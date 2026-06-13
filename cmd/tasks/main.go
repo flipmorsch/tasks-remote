@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"tasks-remote/internal/cloudsync"
 	"tasks-remote/internal/googleauth"
@@ -84,6 +85,8 @@ func run(ctx context.Context, args []string) error {
 		addFlags := flag.NewFlagSet("add", flag.ContinueOnError)
 		addFlags.SetOutput(os.Stderr)
 		body := addFlags.String("body", "", "task body")
+		dueRaw := addFlags.String("due", "", "due date/time as YYYY-MM-DD or RFC3339")
+		remindRaw := addFlags.String("remind", "", "reminder date/time as YYYY-MM-DD or RFC3339")
 		if err := addFlags.Parse(commandArgs); err != nil {
 			return err
 		}
@@ -95,7 +98,20 @@ func run(ctx context.Context, args []string) error {
 			return err
 		}
 		defer store.Close()
-		task, err := store.AddTask(ctx, strings.Join(addFlags.Args(), " "), *body)
+		dueAt, err := parseOptionalTime(*dueRaw)
+		if err != nil {
+			return err
+		}
+		reminderAt, err := parseOptionalTime(*remindRaw)
+		if err != nil {
+			return err
+		}
+		task, err := store.AddTaskWithInput(ctx, storage.TaskInput{
+			Title:      strings.Join(addFlags.Args(), " "),
+			Body:       *body,
+			DueAt:      dueAt,
+			ReminderAt: reminderAt,
+		})
 		if err != nil {
 			return err
 		}
@@ -112,7 +128,7 @@ func run(ctx context.Context, args []string) error {
 			return err
 		}
 		for _, task := range tasks {
-			fmt.Printf("%s [%s] %s%s\n", task.ID, task.Status, task.Title, formatTags(task.Tags))
+			fmt.Printf("%s [%s] %s%s%s\n", task.ID, task.Status, task.Title, formatTags(task.Tags), formatDates(task))
 		}
 		return nil
 	case "show":
@@ -132,6 +148,12 @@ func run(ctx context.Context, args []string) error {
 		if len(task.Tags) > 0 {
 			fmt.Printf("tags: %s\n", strings.Join(task.Tags, ", "))
 		}
+		if task.DueAt != nil {
+			fmt.Printf("due: %s\n", task.DueAt.Format(time.RFC3339))
+		}
+		if task.ReminderAt != nil {
+			fmt.Printf("reminder: %s\n", task.ReminderAt.Format(time.RFC3339))
+		}
 		if task.Body != "" {
 			fmt.Printf("\n%s\n", task.Body)
 		}
@@ -150,13 +172,15 @@ func run(ctx context.Context, args []string) error {
 			return err
 		}
 		for _, task := range tasks {
-			fmt.Printf("%s [%s] %s%s\n", task.ID, task.Status, task.Title, formatTags(task.Tags))
+			fmt.Printf("%s [%s] %s%s%s\n", task.ID, task.Status, task.Title, formatTags(task.Tags), formatDates(task))
 		}
 		return nil
 	case "edit":
 		editFlags := flag.NewFlagSet("edit", flag.ContinueOnError)
 		editFlags.SetOutput(os.Stderr)
 		body := editFlags.String("body", "", "task body")
+		dueRaw := editFlags.String("due", "", "due date/time as YYYY-MM-DD or RFC3339")
+		remindRaw := editFlags.String("remind", "", "reminder date/time as YYYY-MM-DD or RFC3339")
 		if err := editFlags.Parse(commandArgs); err != nil {
 			return err
 		}
@@ -168,7 +192,20 @@ func run(ctx context.Context, args []string) error {
 			return err
 		}
 		defer store.Close()
-		task, err := store.EditTask(ctx, editFlags.Args()[0], strings.Join(editFlags.Args()[1:], " "), *body)
+		dueAt, err := parseOptionalTime(*dueRaw)
+		if err != nil {
+			return err
+		}
+		reminderAt, err := parseOptionalTime(*remindRaw)
+		if err != nil {
+			return err
+		}
+		task, err := store.EditTaskWithInput(ctx, editFlags.Args()[0], storage.TaskInput{
+			Title:      strings.Join(editFlags.Args()[1:], " "),
+			Body:       *body,
+			DueAt:      dueAt,
+			ReminderAt: reminderAt,
+		})
 		if err != nil {
 			return err
 		}
@@ -496,6 +533,36 @@ func formatTags(tags []string) string {
 	return " " + strings.Join(formatted, " ")
 }
 
+func formatDates(task storage.Task) string {
+	var parts []string
+	if task.DueAt != nil {
+		parts = append(parts, "due:"+task.DueAt.Format("2006-01-02"))
+	}
+	if task.ReminderAt != nil {
+		parts = append(parts, "remind:"+task.ReminderAt.Format("2006-01-02"))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " " + strings.Join(parts, " ")
+}
+
+func parseOptionalTime(raw string) (*time.Time, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	if parsed, err := time.Parse(time.RFC3339, raw); err == nil {
+		value := parsed.UTC().Truncate(time.Second)
+		return &value, nil
+	}
+	if parsed, err := time.ParseInLocation("2006-01-02", raw, time.Local); err == nil {
+		value := parsed.UTC().Truncate(time.Second)
+		return &value, nil
+	}
+	return nil, fmt.Errorf("invalid time %q: use YYYY-MM-DD or RFC3339", raw)
+}
+
 func defaultDBPath() string {
 	if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" {
 		return filepath.Join(xdg, "tasks-remote", "tasks.db")
@@ -514,8 +581,8 @@ implemented:
   init
   unlock
   lock
-  add [-body text] <title>
-  edit [-body text] <task-id> <title>
+  add [-body text] [-due date] [-remind date] <title>
+  edit [-body text] [-due date] [-remind date] <task-id> <title>
   done <task-id>
   reopen <task-id>
   delete <task-id>

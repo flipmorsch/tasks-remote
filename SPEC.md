@@ -81,6 +81,7 @@ Current implementation note:
 - `tasks lock` clears the cached OS keychain entry for the selected database.
 - Keychain entries are scoped by local database path.
 - Task tags are treated as Sensitive Task Data and stored inside encrypted task and change payloads.
+- Due dates and reminder dates are treated as Sensitive Task Data and stored inside encrypted task and change payloads.
 
 ## Storage Architecture
 

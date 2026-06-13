@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestTaskPayloadsAreEncryptedAtRest(t *testing.T) {
@@ -308,6 +309,68 @@ func TestTagMutationsAreEncryptedAtRest(t *testing.T) {
 		}
 		if bytes.Contains(data, []byte(tag)) {
 			t.Fatalf("plaintext tag found in %s", path)
+		}
+	}
+}
+
+func TestDueAndReminderAreEncryptedAndReplayed(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "tasks.db")
+	secret := "date secret"
+	due := time.Date(2026, 7, 10, 15, 30, 0, 0, time.UTC)
+	reminder := time.Date(2026, 7, 9, 9, 0, 0, 0, time.UTC)
+
+	if err := Init(ctx, dbPath, secret); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	store, err := Open(ctx, dbPath, secret)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	task, err := store.AddTaskWithInput(ctx, TaskInput{
+		Title:      "Dated private task",
+		Body:       "Dated private body",
+		DueAt:      &due,
+		ReminderAt: &reminder,
+	})
+	if err != nil {
+		t.Fatalf("add dated task: %v", err)
+	}
+	if task.DueAt == nil || !task.DueAt.Equal(due) {
+		t.Fatalf("unexpected due date: %#v", task.DueAt)
+	}
+	if task.ReminderAt == nil || !task.ReminderAt.Equal(reminder) {
+		t.Fatalf("unexpected reminder date: %#v", task.ReminderAt)
+	}
+	if _, err := store.db.ExecContext(ctx, `delete from tasks`); err != nil {
+		t.Fatalf("damage projection: %v", err)
+	}
+	if err := store.RebuildProjection(ctx); err != nil {
+		t.Fatalf("rebuild: %v", err)
+	}
+	replayed, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("get replayed: %v", err)
+	}
+	if replayed.DueAt == nil || !replayed.DueAt.Equal(due) {
+		t.Fatalf("unexpected replayed due date: %#v", replayed.DueAt)
+	}
+	if replayed.ReminderAt == nil || !replayed.ReminderAt.Equal(reminder) {
+		t.Fatalf("unexpected replayed reminder date: %#v", replayed.ReminderAt)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	for _, path := range []string{dbPath, dbPath + "-wal", dbPath + "-shm"} {
+		data, err := os.ReadFile(path)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		if bytes.Contains(data, []byte("2026-07-10")) || bytes.Contains(data, []byte("2026-07-09")) {
+			t.Fatalf("plaintext date found in %s", path)
 		}
 	}
 }

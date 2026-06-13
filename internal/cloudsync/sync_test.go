@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"tasks-remote/internal/storage"
 )
@@ -20,6 +21,7 @@ func TestPushAndPullEncryptedChanges(t *testing.T) {
 	syncDir := t.TempDir()
 	title := "Private drive sync title"
 	body := "Private drive sync body"
+	due := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
 
 	if err := storage.Init(ctx, sourceDB, secret); err != nil {
 		t.Fatalf("init source: %v", err)
@@ -28,7 +30,7 @@ func TestPushAndPullEncryptedChanges(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open source: %v", err)
 	}
-	if _, err := source.AddTask(ctx, title, body); err != nil {
+	if _, err := source.AddTaskWithInput(ctx, storage.TaskInput{Title: title, Body: body, DueAt: &due}); err != nil {
 		t.Fatalf("add source task: %v", err)
 	}
 	sourceTasks, err := source.ListTasks(ctx)
@@ -64,7 +66,7 @@ func TestPushAndPullEncryptedChanges(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read artifact %s: %v", name, err)
 		}
-		if bytes.Contains(data, []byte(title)) || bytes.Contains(data, []byte(body)) || bytes.Contains(data, []byte("drive-private")) {
+		if bytes.Contains(data, []byte(title)) || bytes.Contains(data, []byte(body)) || bytes.Contains(data, []byte("drive-private")) || bytes.Contains(data, []byte("2026-08-05")) {
 			t.Fatalf("plaintext task content found in %s", name)
 		}
 	}
@@ -94,6 +96,9 @@ func TestPushAndPullEncryptedChanges(t *testing.T) {
 	}
 	if len(tasks[0].Tags) != 1 || tasks[0].Tags[0] != "drive-private" {
 		t.Fatalf("unexpected restored tags: %#v", tasks[0])
+	}
+	if tasks[0].DueAt == nil || !tasks[0].DueAt.Equal(due) {
+		t.Fatalf("unexpected restored due date: %#v", tasks[0])
 	}
 }
 

@@ -25,19 +25,30 @@ type Store struct {
 }
 
 type Task struct {
-	ID        string
-	Title     string
-	Body      string
-	Tags      []string
-	Status    string
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	ID         string
+	Title      string
+	Body       string
+	Tags       []string
+	DueAt      *time.Time
+	ReminderAt *time.Time
+	Status     string
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
 }
 
 type taskPayload struct {
-	Title string   `json:"title"`
-	Body  string   `json:"body,omitempty"`
-	Tags  []string `json:"tags,omitempty"`
+	Title      string     `json:"title"`
+	Body       string     `json:"body,omitempty"`
+	Tags       []string   `json:"tags,omitempty"`
+	DueAt      *time.Time `json:"due_at,omitempty"`
+	ReminderAt *time.Time `json:"reminder_at,omitempty"`
+}
+
+type TaskInput struct {
+	Title      string
+	Body       string
+	DueAt      *time.Time
+	ReminderAt *time.Time
 }
 
 type Change struct {
@@ -91,10 +102,12 @@ type artifactEnvelope struct {
 }
 
 type changePayload struct {
-	Title  string   `json:"title,omitempty"`
-	Body   string   `json:"body,omitempty"`
-	Tags   []string `json:"tags,omitempty"`
-	Status string   `json:"status,omitempty"`
+	Title      string     `json:"title,omitempty"`
+	Body       string     `json:"body,omitempty"`
+	Tags       []string   `json:"tags,omitempty"`
+	DueAt      *time.Time `json:"due_at,omitempty"`
+	ReminderAt *time.Time `json:"reminder_at,omitempty"`
+	Status     string     `json:"status,omitempty"`
 }
 
 func ReadSyncStatus(ctx context.Context, path string) (SyncStatus, error) {
@@ -405,21 +418,27 @@ func (s *Store) OpenArtifact(name string, envelopeData []byte) ([]byte, error) {
 }
 
 func (s *Store) AddTask(ctx context.Context, title, body string) (Task, error) {
-	title = strings.TrimSpace(title)
-	if title == "" {
+	return s.AddTaskWithInput(ctx, TaskInput{Title: title, Body: body})
+}
+
+func (s *Store) AddTaskWithInput(ctx context.Context, input TaskInput) (Task, error) {
+	input.Title = strings.TrimSpace(input.Title)
+	if input.Title == "" {
 		return Task{}, errors.New("title is required")
 	}
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	task := Task{
-		ID:        newID("task"),
-		Title:     title,
-		Body:      body,
-		Tags:      []string{},
-		Status:    "open",
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:         newID("task"),
+		Title:      input.Title,
+		Body:       input.Body,
+		Tags:       []string{},
+		DueAt:      cloneTime(input.DueAt),
+		ReminderAt: cloneTime(input.ReminderAt),
+		Status:     "open",
+		CreatedAt:  now,
+		UpdatedAt:  now,
 	}
-	nonce, ciphertext, err := encryptTask(s.key, task.ID, taskPayload{Title: title, Body: body, Tags: task.Tags})
+	nonce, ciphertext, err := encryptTask(s.key, task.ID, task.toPayload())
 	if err != nil {
 		return Task{}, err
 	}
@@ -436,10 +455,12 @@ func (s *Store) AddTask(ctx context.Context, title, body string) (Task, error) {
 		return Task{}, fmt.Errorf("insert task: %w", err)
 	}
 	if _, err := s.appendChange(ctx, tx, task.ID, "task.created", changePayload{
-		Title:  title,
-		Body:   body,
-		Tags:   task.Tags,
-		Status: task.Status,
+		Title:      task.Title,
+		Body:       task.Body,
+		Tags:       task.Tags,
+		DueAt:      task.DueAt,
+		ReminderAt: task.ReminderAt,
+		Status:     task.Status,
 	}, now); err != nil {
 		return Task{}, err
 	}
@@ -450,8 +471,12 @@ func (s *Store) AddTask(ctx context.Context, title, body string) (Task, error) {
 }
 
 func (s *Store) EditTask(ctx context.Context, id, title, body string) (Task, error) {
-	title = strings.TrimSpace(title)
-	if title == "" {
+	return s.EditTaskWithInput(ctx, id, TaskInput{Title: title, Body: body})
+}
+
+func (s *Store) EditTaskWithInput(ctx context.Context, id string, input TaskInput) (Task, error) {
+	input.Title = strings.TrimSpace(input.Title)
+	if input.Title == "" {
 		return Task{}, errors.New("title is required")
 	}
 	current, err := s.GetTask(ctx, id)
@@ -459,10 +484,12 @@ func (s *Store) EditTask(ctx context.Context, id, title, body string) (Task, err
 		return Task{}, err
 	}
 	now := time.Now().UTC().Truncate(time.Microsecond)
-	current.Title = title
-	current.Body = body
+	current.Title = input.Title
+	current.Body = input.Body
+	current.DueAt = cloneTime(input.DueAt)
+	current.ReminderAt = cloneTime(input.ReminderAt)
 	current.UpdatedAt = now
-	nonce, ciphertext, err := encryptTask(s.key, current.ID, taskPayload{Title: title, Body: body, Tags: current.Tags})
+	nonce, ciphertext, err := encryptTask(s.key, current.ID, current.toPayload())
 	if err != nil {
 		return Task{}, err
 	}
@@ -482,7 +509,7 @@ func (s *Store) EditTask(ctx context.Context, id, title, body string) (Task, err
 	if err := requireAffected(res, id); err != nil {
 		return Task{}, err
 	}
-	if _, err := s.appendChange(ctx, tx, id, "task.updated", changePayload{Title: title, Body: body, Tags: current.Tags}, now); err != nil {
+	if _, err := s.appendChange(ctx, tx, id, "task.updated", changePayload{Title: current.Title, Body: current.Body, Tags: current.Tags, DueAt: current.DueAt, ReminderAt: current.ReminderAt}, now); err != nil {
 		return Task{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -531,7 +558,7 @@ func (s *Store) RemoveTag(ctx context.Context, id, tag string) (Task, error) {
 func (s *Store) updateTaskTags(ctx context.Context, task Task) (Task, error) {
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	task.UpdatedAt = now
-	nonce, ciphertext, err := encryptTask(s.key, task.ID, taskPayload{Title: task.Title, Body: task.Body, Tags: task.Tags})
+	nonce, ciphertext, err := encryptTask(s.key, task.ID, task.toPayload())
 	if err != nil {
 		return Task{}, err
 	}
@@ -784,13 +811,15 @@ func (s *Store) scanTask(row scanner) (Task, error) {
 		return Task{}, fmt.Errorf("parse updated_at: %w", err)
 	}
 	return Task{
-		ID:        taskID,
-		Title:     payload.Title,
-		Body:      payload.Body,
-		Tags:      append([]string(nil), payload.Tags...),
-		Status:    status,
-		CreatedAt: createdAt,
-		UpdatedAt: updatedAt,
+		ID:         taskID,
+		Title:      payload.Title,
+		Body:       payload.Body,
+		Tags:       append([]string(nil), payload.Tags...),
+		DueAt:      cloneTime(payload.DueAt),
+		ReminderAt: cloneTime(payload.ReminderAt),
+		Status:     status,
+		CreatedAt:  createdAt,
+		UpdatedAt:  updatedAt,
 	}, nil
 }
 
@@ -983,7 +1012,7 @@ func (s *Store) replayChange(ctx context.Context, tx *sql.Tx, taskID, changeType
 		if status == "" {
 			status = "open"
 		}
-		nonce, ciphertext, err := encryptTask(s.key, taskID, taskPayload{Title: payload.Title, Body: payload.Body, Tags: payload.Tags})
+		nonce, ciphertext, err := encryptTask(s.key, taskID, taskPayload{Title: payload.Title, Body: payload.Body, Tags: payload.Tags, DueAt: payload.DueAt, ReminderAt: payload.ReminderAt})
 		if err != nil {
 			return err
 		}
@@ -1004,6 +1033,8 @@ func (s *Store) replayChange(ctx context.Context, tx *sql.Tx, taskID, changeType
 		current.Title = payload.Title
 		current.Body = payload.Body
 		current.Tags = append([]string(nil), payload.Tags...)
+		current.DueAt = cloneTime(payload.DueAt)
+		current.ReminderAt = cloneTime(payload.ReminderAt)
 		nonce, ciphertext, err := encryptTask(s.key, taskID, current)
 		if err != nil {
 			return err
@@ -1093,6 +1124,24 @@ func tagsContain(tags []string, query string) bool {
 		}
 	}
 	return false
+}
+
+func (t Task) toPayload() taskPayload {
+	return taskPayload{
+		Title:      t.Title,
+		Body:       t.Body,
+		Tags:       append([]string(nil), t.Tags...),
+		DueAt:      cloneTime(t.DueAt),
+		ReminderAt: cloneTime(t.ReminderAt),
+	}
+}
+
+func cloneTime(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	cloned := value.UTC().Truncate(time.Second)
+	return &cloned
 }
 
 func newID(prefix string) string {

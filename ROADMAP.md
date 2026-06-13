@@ -24,9 +24,10 @@ Current status:
 
 - Basic offline task commands are implemented.
 - Encrypted task tags are implemented.
+- Encrypted due dates and reminder dates are implemented.
 - OS keychain-backed `unlock` and `lock` are implemented.
 - `TASKS_REMOTE_SECRET` remains available for automation.
-- Reminders and conflict resolution are not implemented yet.
+- Local notification delivery and conflict resolution are not implemented yet.
 
 ## Phase 2: Task Change Log and Replay
 
