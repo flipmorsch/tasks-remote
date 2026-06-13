@@ -82,6 +82,7 @@ Current implementation note:
 - Keychain entries are scoped by local database path.
 - Task tags are treated as Sensitive Task Data and stored inside encrypted task and change payloads.
 - Due dates and reminder dates are treated as Sensitive Task Data and stored inside encrypted task and change payloads.
+- `tasks export -out <path> --confirm-plaintext` writes active tasks to a new plaintext JSON file and refuses to overwrite an existing path.
 
 ## Storage Architecture
 
@@ -344,6 +345,5 @@ Manual acceptance:
 
 - Final binary name.
 - Whether v1 supports reminders as local notifications or only stored reminder dates.
-- Whether plaintext export is in v1 or delayed until recovery/export UX is stronger.
 - Exact supported keychain platform matrix.
 - Whether a later whole-database encrypted SQLite spike should target SQLCipher or another maintained option.

@@ -375,6 +375,61 @@ func TestDueAndReminderAreEncryptedAndReplayed(t *testing.T) {
 	}
 }
 
+func TestPlaintextExportIncludesActiveSensitiveData(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "tasks.db")
+	secret := "export secret"
+	due := time.Date(2026, 9, 1, 8, 0, 0, 0, time.UTC)
+
+	if err := Init(ctx, dbPath, secret); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	store, err := Open(ctx, dbPath, secret)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer store.Close()
+	task, err := store.AddTaskWithInput(ctx, TaskInput{
+		Title: "Export private title",
+		Body:  "Export private body",
+		DueAt: &due,
+	})
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	if _, err := store.AddTag(ctx, task.ID, "export-private"); err != nil {
+		t.Fatalf("tag: %v", err)
+	}
+	deleted, err := store.AddTask(ctx, "Deleted private title", "")
+	if err != nil {
+		t.Fatalf("add deleted: %v", err)
+	}
+	if err := store.DeleteTask(ctx, deleted.ID); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+
+	exportData, err := store.ExportPlaintext(ctx)
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	if exportData.Version != 1 || exportData.Warning == "" {
+		t.Fatalf("unexpected export metadata: %#v", exportData)
+	}
+	if len(exportData.ActiveTasks) != 1 {
+		t.Fatalf("expected one active exported task, got %#v", exportData.ActiveTasks)
+	}
+	got := exportData.ActiveTasks[0]
+	if got.Title != "Export private title" || got.Body != "Export private body" {
+		t.Fatalf("unexpected exported task: %#v", got)
+	}
+	if len(got.Tags) != 1 || got.Tags[0] != "export-private" {
+		t.Fatalf("unexpected exported tags: %#v", got)
+	}
+	if got.DueAt == nil || !got.DueAt.Equal(due) {
+		t.Fatalf("unexpected exported due date: %#v", got.DueAt)
+	}
+}
+
 func TestReadSyncStatusDoesNotNeedRecoverySecret(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "tasks.db")

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -266,10 +267,52 @@ func run(ctx context.Context, args []string) error {
 	case "logout":
 		return runLogout(commandArgs)
 	case "export":
-		return fmt.Errorf("%s is planned but not implemented yet", command)
+		return runExport(ctx, *dbPath, commandArgs)
 	default:
 		return fmt.Errorf("unknown command: %s", command)
 	}
+}
+
+func runExport(ctx context.Context, dbPath string, args []string) error {
+	exportFlags := flag.NewFlagSet("export", flag.ContinueOnError)
+	exportFlags.SetOutput(os.Stderr)
+	out := exportFlags.String("out", "", "plaintext export output path")
+	confirm := exportFlags.Bool("confirm-plaintext", false, "confirm writing Sensitive Task Data in plaintext")
+	if err := exportFlags.Parse(args); err != nil {
+		return err
+	}
+	if *out == "" {
+		return fmt.Errorf("export requires -out")
+	}
+	if !*confirm {
+		return fmt.Errorf("export writes plaintext Sensitive Task Data; rerun with --confirm-plaintext")
+	}
+	store, err := openStore(ctx, dbPath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	exportData, err := store.ExportPlaintext(ctx)
+	if err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(exportData, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode plaintext export: %w", err)
+	}
+	file, err := os.OpenFile(*out, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return fmt.Errorf("create plaintext export: %w", err)
+	}
+	defer file.Close()
+	if _, err := file.Write(data); err != nil {
+		return fmt.Errorf("write plaintext export: %w", err)
+	}
+	if _, err := file.Write([]byte("\n")); err != nil {
+		return fmt.Errorf("finish plaintext export: %w", err)
+	}
+	fmt.Printf("exported plaintext tasks to %s\n", *out)
+	return nil
 }
 
 func runTag(ctx context.Context, dbPath string, args []string) error {
@@ -598,6 +641,7 @@ implemented:
   sync restore -dir <path>
   login google -credentials <file>
   logout google
+  export -out <path> --confirm-plaintext
 
 unlock:
   run unlock once per database, or set TASKS_REMOTE_SECRET for automation`)

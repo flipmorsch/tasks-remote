@@ -51,6 +51,13 @@ type TaskInput struct {
 	ReminderAt *time.Time
 }
 
+type PlaintextExport struct {
+	Version     int       `json:"version"`
+	ExportedAt  time.Time `json:"exported_at"`
+	Warning     string    `json:"warning"`
+	ActiveTasks []Task    `json:"active_tasks"`
+}
+
 type Change struct {
 	ID        string
 	DeviceID  string
@@ -379,6 +386,19 @@ func (s *Store) ListConflicts(ctx context.Context) ([]SyncConflict, error) {
 		return nil, fmt.Errorf("read sync conflicts: %w", err)
 	}
 	return conflicts, nil
+}
+
+func (s *Store) ExportPlaintext(ctx context.Context) (PlaintextExport, error) {
+	tasks, err := s.ListTasks(ctx)
+	if err != nil {
+		return PlaintextExport{}, err
+	}
+	return PlaintextExport{
+		Version:     1,
+		ExportedAt:  time.Now().UTC().Truncate(time.Second),
+		Warning:     "This file contains plaintext Sensitive Task Data.",
+		ActiveTasks: tasks,
+	}, nil
 }
 
 func (s *Store) SealArtifact(name string, plaintext []byte) ([]byte, error) {
