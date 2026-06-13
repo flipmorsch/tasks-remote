@@ -239,6 +239,14 @@ Create Sync Conflict:
 
 Conflict resolution must preserve both versions until the user chooses the result.
 
+Current implementation note:
+
+- Each change records the per-task change it was authored against (`parent_change_id`). Two changes that share a parent are a fork: two devices edited the same version of a task offline.
+- Concurrent content edits become a `concurrent_edit` Sync Conflict and delete/edit collisions become a `delete_edit` Sync Conflict. Both sides are preserved in the change log.
+- Lower-stakes forks (completion status, tags) fall through to temporal last-writer-wins replay rather than blocking the user.
+- `tasks conflicts` lists open conflicts with both decrypted sides; `tasks conflicts resolve <conflict-id> --use local|remote` records the choice as a new `task.resolved` change that wins replay and converges to other devices when it syncs in.
+- Known v1 limitation: detection compares the changes at the fork point. If a device makes several edits to a task before its first sync with a divergent device, resolution applies the fork-point version of the chosen side rather than that side's latest edit.
+
 ## Crypto Requirements
 
 The Recovery Secret protects a root key. The root key protects local database access and cloud sync encryption keys.

@@ -345,29 +345,97 @@ func runTag(ctx context.Context, dbPath string, args []string) error {
 }
 
 func runConflicts(ctx context.Context, dbPath string, args []string) error {
+	if len(args) > 0 && args[0] == "resolve" {
+		return runConflictResolve(ctx, dbPath, args[1:])
+	}
 	if len(args) > 0 {
-		return fmt.Errorf("conflicts does not accept arguments yet")
+		return fmt.Errorf("unknown conflicts subcommand: %s", args[0])
 	}
 	store, err := openStore(ctx, dbPath)
 	if err != nil {
 		return err
 	}
 	defer store.Close()
-	conflicts, err := store.ListConflicts(ctx)
+	conflicts, err := store.ListConflictDetails(ctx)
 	if err != nil {
 		return err
 	}
+	if len(conflicts) == 0 {
+		fmt.Println("no open conflicts")
+		return nil
+	}
 	for _, conflict := range conflicts {
-		fmt.Printf("%s %s device=%s sequence=%d local=%s remote=%s\n",
-			conflict.ID,
-			conflict.Type,
-			conflict.DeviceID,
-			conflict.Sequence,
-			conflict.LocalChangeID,
-			conflict.RemoteChangeID,
-		)
+		fmt.Printf("%s %s task=%s\n", conflict.ID, conflict.Type, conflict.TaskID)
+		fmt.Printf("  local:  %s\n", formatConflictSide(conflict.Local))
+		fmt.Printf("  remote: %s\n", formatConflictSide(conflict.Remote))
+		if conflict.Type == "duplicate_device_sequence" {
+			fmt.Printf("  resolve: tasks conflicts resolve %s\n", conflict.ID)
+		} else {
+			fmt.Printf("  resolve: tasks conflicts resolve %s --use local|remote\n", conflict.ID)
+		}
 	}
 	return nil
+}
+
+func runConflictResolve(ctx context.Context, dbPath string, args []string) error {
+	// Pull the conflict id out first so it can appear before or after --use;
+	// Go's flag package otherwise stops parsing at the first positional.
+	conflictID, flagArgs := splitPositional(args)
+	if conflictID == "" {
+		return fmt.Errorf("conflicts resolve requires a conflict id")
+	}
+	resolveFlags := flag.NewFlagSet("conflicts resolve", flag.ContinueOnError)
+	resolveFlags.SetOutput(os.Stderr)
+	use := resolveFlags.String("use", "", "which side to keep: local or remote")
+	if err := resolveFlags.Parse(flagArgs); err != nil {
+		return err
+	}
+	if len(resolveFlags.Args()) != 0 {
+		return fmt.Errorf("unexpected arguments: %s", strings.Join(resolveFlags.Args(), " "))
+	}
+	store, err := openStore(ctx, dbPath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	if err := store.ResolveConflict(ctx, conflictID, *use); err != nil {
+		return err
+	}
+	fmt.Printf("resolved %s\n", conflictID)
+	return nil
+}
+
+// splitPositional returns the first non-flag argument and all remaining
+// arguments, so a single positional can be mixed freely with flags.
+func splitPositional(args []string) (string, []string) {
+	positional := ""
+	rest := make([]string, 0, len(args))
+	for _, arg := range args {
+		if positional == "" && !strings.HasPrefix(arg, "-") {
+			positional = arg
+			continue
+		}
+		rest = append(rest, arg)
+	}
+	return positional, rest
+}
+
+func formatConflictSide(side storage.ConflictSide) string {
+	device := side.DeviceID
+	if len(device) > 16 {
+		device = device[:16]
+	}
+	if !side.Present {
+		return fmt.Sprintf("[change %s] not stored (rejected duplicate)", side.ChangeID)
+	}
+	if side.Deleted {
+		return fmt.Sprintf("[device %s] deleted task", device)
+	}
+	summary := side.Title
+	if side.Body != "" {
+		summary += " — " + side.Body
+	}
+	return fmt.Sprintf("[device %s] %s%s", device, summary, formatTags(side.Tags))
 }
 
 func runLogin(ctx context.Context, args []string) error {
@@ -635,6 +703,7 @@ implemented:
   show <task-id>
   search <query>
   conflicts
+  conflicts resolve <conflict-id> --use local|remote
   sync status
   sync push -dir <path>
   sync pull -dir <path>

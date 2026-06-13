@@ -100,6 +100,14 @@ Acceptance:
 - Sync failures are visible and retryable.
 - Recovery target is measured against the accepted Recovery Window.
 
+Current status:
+
+- Restore from encrypted per-device artifacts works through `sync restore`.
+- Independent field edits (e.g. completion vs. content) auto-merge.
+- Concurrent content edits and delete/edit collisions become user-resolvable Sync Conflicts that preserve both sides.
+- `tasks conflicts resolve <conflict-id> --use local|remote` records a resolution that converges across devices.
+- Visible Sync Health states beyond `sync status` counts are not built yet.
+
 ## Phase 5: Hardening and Release Readiness
 
 Prepare for real personal use.

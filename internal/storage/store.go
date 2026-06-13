@@ -78,11 +78,33 @@ type SyncStatus struct {
 type SyncConflict struct {
 	ID             string
 	Type           string
+	TaskID         string
 	DeviceID       string
 	Sequence       int64
 	LocalChangeID  string
 	RemoteChangeID string
 	CreatedAt      time.Time
+}
+
+// ConflictSide is one of the two divergent changes in a Sync Conflict, decoded
+// for display so the user can tell the versions apart before choosing.
+type ConflictSide struct {
+	Label      string // "local" or "remote": the keyword passed to resolve
+	ChangeID   string
+	DeviceID   string
+	ChangeType string
+	Present    bool // false when the change was not stored (e.g. a rejected duplicate)
+	Deleted    bool
+	Title      string
+	Body       string
+	Tags       []string
+}
+
+// ConflictDetail is a Sync Conflict with both sides decoded for the user.
+type ConflictDetail struct {
+	SyncConflict
+	Local  ConflictSide
+	Remote ConflictSide
 }
 
 type Manifest struct {
@@ -96,6 +118,7 @@ type ExportedChange struct {
 	Sequence         int64  `json:"sequence"`
 	TaskID           string `json:"task_id"`
 	ChangeType       string `json:"change_type"`
+	ParentChangeID   string `json:"parent_change_id,omitempty"`
 	EncryptedPayload string `json:"encrypted_payload"`
 	PayloadNonce     string `json:"payload_nonce"`
 	PayloadKeyID     string `json:"payload_key_id"`
@@ -115,6 +138,9 @@ type changePayload struct {
 	DueAt      *time.Time `json:"due_at,omitempty"`
 	ReminderAt *time.Time `json:"reminder_at,omitempty"`
 	Status     string     `json:"status,omitempty"`
+	// Deleted marks a task.resolved change that resolves a conflict by deleting
+	// the task rather than keeping a content version.
+	Deleted bool `json:"deleted,omitempty"`
 }
 
 func ReadSyncStatus(ctx context.Context, path string) (SyncStatus, error) {
@@ -260,7 +286,7 @@ func (s *Store) LocalDeviceID(ctx context.Context) (string, error) {
 
 func (s *Store) ExportChanges(ctx context.Context) ([]ExportedChange, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		select change_id, device_id, sequence, task_id, change_type, encrypted_payload, payload_nonce, payload_key_id, created_at
+		select change_id, device_id, sequence, task_id, change_type, parent_change_id, encrypted_payload, payload_nonce, payload_key_id, created_at
 		from task_changes
 		order by device_id, sequence`)
 	if err != nil {
@@ -275,7 +301,7 @@ func (s *Store) ExportChanges(ctx context.Context) ([]ExportedChange, error) {
 // push never has to rewrite another device's history.
 func (s *Store) ExportDeviceChanges(ctx context.Context, deviceID string) ([]ExportedChange, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		select change_id, device_id, sequence, task_id, change_type, encrypted_payload, payload_nonce, payload_key_id, created_at
+		select change_id, device_id, sequence, task_id, change_type, parent_change_id, encrypted_payload, payload_nonce, payload_key_id, created_at
 		from task_changes
 		where device_id = ?
 		order by sequence`, deviceID)
@@ -290,11 +316,11 @@ func scanExportedChanges(rows *sql.Rows) ([]ExportedChange, error) {
 	var changes []ExportedChange
 	for rows.Next() {
 		var (
-			changeID, deviceID, taskID, changeType, payloadKeyID, createdAt string
-			sequence                                                        int64
-			encryptedPayload, payloadNonce                                  []byte
+			changeID, deviceID, taskID, changeType, parentChangeID, payloadKeyID, createdAt string
+			sequence                                                                        int64
+			encryptedPayload, payloadNonce                                                  []byte
 		)
-		if err := rows.Scan(&changeID, &deviceID, &sequence, &taskID, &changeType, &encryptedPayload, &payloadNonce, &payloadKeyID, &createdAt); err != nil {
+		if err := rows.Scan(&changeID, &deviceID, &sequence, &taskID, &changeType, &parentChangeID, &encryptedPayload, &payloadNonce, &payloadKeyID, &createdAt); err != nil {
 			return nil, fmt.Errorf("scan exported change: %w", err)
 		}
 		changes = append(changes, ExportedChange{
@@ -303,6 +329,7 @@ func scanExportedChanges(rows *sql.Rows) ([]ExportedChange, error) {
 			Sequence:         sequence,
 			TaskID:           taskID,
 			ChangeType:       changeType,
+			ParentChangeID:   parentChangeID,
 			EncryptedPayload: base64.StdEncoding.EncodeToString(encryptedPayload),
 			PayloadNonce:     base64.StdEncoding.EncodeToString(payloadNonce),
 			PayloadKeyID:     payloadKeyID,
@@ -366,13 +393,16 @@ func (s *Store) ImportChanges(ctx context.Context, changes []ExportedChange) err
 			return fmt.Errorf("decode change nonce %s: %w", change.ChangeID, err)
 		}
 		_, err = tx.ExecContext(ctx, `
-			insert into task_changes(change_id, device_id, sequence, task_id, change_type, encrypted_payload, payload_nonce, payload_key_id, created_at, sync_state)
-			values(?, ?, ?, ?, ?, ?, ?, ?, ?, 'synced')
+			insert into task_changes(change_id, device_id, sequence, task_id, change_type, parent_change_id, encrypted_payload, payload_nonce, payload_key_id, created_at, sync_state)
+			values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'synced')
 			on conflict(change_id) do nothing`,
-			change.ChangeID, change.DeviceID, change.Sequence, change.TaskID, change.ChangeType, encryptedPayload, payloadNonce, change.PayloadKeyID, change.CreatedAt)
+			change.ChangeID, change.DeviceID, change.Sequence, change.TaskID, change.ChangeType, change.ParentChangeID, encryptedPayload, payloadNonce, change.PayloadKeyID, change.CreatedAt)
 		if err != nil {
 			return fmt.Errorf("insert imported change %s: %w", change.ChangeID, err)
 		}
+	}
+	if err := s.reconcileForkConflicts(ctx, tx); err != nil {
+		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit import changes: %w", err)
@@ -382,7 +412,7 @@ func (s *Store) ImportChanges(ctx context.Context, changes []ExportedChange) err
 
 func (s *Store) ListConflicts(ctx context.Context) ([]SyncConflict, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		select conflict_id, conflict_type, device_id, sequence, local_change_id, remote_change_id, created_at
+		select conflict_id, conflict_type, task_id, device_id, sequence, local_change_id, remote_change_id, created_at
 		from sync_conflicts
 		where resolved_at is null
 		order by created_at asc`)
@@ -392,30 +422,200 @@ func (s *Store) ListConflicts(ctx context.Context) ([]SyncConflict, error) {
 	defer rows.Close()
 	var conflicts []SyncConflict
 	for rows.Next() {
-		var conflict SyncConflict
-		var createdRaw string
-		if err := rows.Scan(
-			&conflict.ID,
-			&conflict.Type,
-			&conflict.DeviceID,
-			&conflict.Sequence,
-			&conflict.LocalChangeID,
-			&conflict.RemoteChangeID,
-			&createdRaw,
-		); err != nil {
-			return nil, fmt.Errorf("scan sync conflict: %w", err)
-		}
-		createdAt, err := time.Parse(time.RFC3339Nano, createdRaw)
+		conflict, err := scanConflict(rows)
 		if err != nil {
-			return nil, fmt.Errorf("parse sync conflict created_at: %w", err)
+			return nil, err
 		}
-		conflict.CreatedAt = createdAt
 		conflicts = append(conflicts, conflict)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("read sync conflicts: %w", err)
 	}
 	return conflicts, nil
+}
+
+func scanConflict(row scanner) (SyncConflict, error) {
+	var conflict SyncConflict
+	var createdRaw string
+	if err := row.Scan(
+		&conflict.ID,
+		&conflict.Type,
+		&conflict.TaskID,
+		&conflict.DeviceID,
+		&conflict.Sequence,
+		&conflict.LocalChangeID,
+		&conflict.RemoteChangeID,
+		&createdRaw,
+	); err != nil {
+		return SyncConflict{}, fmt.Errorf("scan sync conflict: %w", err)
+	}
+	createdAt, err := time.Parse(time.RFC3339Nano, createdRaw)
+	if err != nil {
+		return SyncConflict{}, fmt.Errorf("parse sync conflict created_at: %w", err)
+	}
+	conflict.CreatedAt = createdAt
+	return conflict, nil
+}
+
+// ListConflictDetails returns each open conflict with both sides decrypted so
+// the caller can present the divergent versions to the user.
+func (s *Store) ListConflictDetails(ctx context.Context) ([]ConflictDetail, error) {
+	conflicts, err := s.ListConflicts(ctx)
+	if err != nil {
+		return nil, err
+	}
+	details := make([]ConflictDetail, 0, len(conflicts))
+	for _, conflict := range conflicts {
+		detail, err := s.conflictDetail(ctx, conflict)
+		if err != nil {
+			return nil, err
+		}
+		details = append(details, detail)
+	}
+	return details, nil
+}
+
+func (s *Store) conflictDetail(ctx context.Context, conflict SyncConflict) (ConflictDetail, error) {
+	local, err := s.conflictSide(ctx, "local", conflict.LocalChangeID)
+	if err != nil {
+		return ConflictDetail{}, err
+	}
+	remote, err := s.conflictSide(ctx, "remote", conflict.RemoteChangeID)
+	if err != nil {
+		return ConflictDetail{}, err
+	}
+	return ConflictDetail{SyncConflict: conflict, Local: local, Remote: remote}, nil
+}
+
+func (s *Store) conflictSide(ctx context.Context, label, changeID string) (ConflictSide, error) {
+	side := ConflictSide{Label: label, ChangeID: changeID}
+	var (
+		deviceID, changeType string
+		ciphertext, nonce    []byte
+	)
+	err := s.db.QueryRowContext(ctx, `
+		select device_id, change_type, encrypted_payload, payload_nonce
+		from task_changes where change_id = ?`, changeID).Scan(&deviceID, &changeType, &ciphertext, &nonce)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			// A rejected duplicate is recorded as a conflict but never stored.
+			return side, nil
+		}
+		return ConflictSide{}, fmt.Errorf("read conflict side %s: %w", changeID, err)
+	}
+	side.Present = true
+	side.DeviceID = deviceID
+	side.ChangeType = changeType
+	side.Deleted = changeType == "task.deleted"
+	if changeType != "task.deleted" {
+		payload, err := decryptChange(s.key, changeID, nonce, ciphertext)
+		if err != nil {
+			return ConflictSide{}, err
+		}
+		side.Title = payload.Title
+		side.Body = payload.Body
+		side.Tags = append([]string(nil), payload.Tags...)
+	}
+	return side, nil
+}
+
+// ResolveConflict records the user's decision for a conflict. For content and
+// delete/edit conflicts it appends a task.resolved change carrying the chosen
+// side, which becomes the newest change and so wins replay everywhere once it
+// syncs. The conflict is marked resolved locally immediately. `use` is "local"
+// or "remote"; for a duplicate-sequence conflict it is ignored and the conflict
+// is simply dismissed (the duplicate was never applied).
+func (s *Store) ResolveConflict(ctx context.Context, conflictID, use string) error {
+	row := s.db.QueryRowContext(ctx, `
+		select conflict_id, conflict_type, task_id, device_id, sequence, local_change_id, remote_change_id, created_at
+		from sync_conflicts
+		where conflict_id = ? and resolved_at is null`, conflictID)
+	conflict, err := scanConflict(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("open conflict not found: %s", conflictID)
+		}
+		return err
+	}
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin resolve conflict: %w", err)
+	}
+	defer tx.Rollback()
+
+	var resolvedChangeID sql.NullString
+	if conflict.Type != "duplicate_device_sequence" {
+		chosenID, err := chosenSide(conflict, use)
+		if err != nil {
+			return err
+		}
+		resolution, err := s.resolutionPayload(ctx, tx, chosenID)
+		if err != nil {
+			return err
+		}
+		change, err := s.appendChangeWithParent(ctx, tx, conflict.TaskID, "task.resolved", resolution, chosenID, now)
+		if err != nil {
+			return err
+		}
+		resolvedChangeID = sql.NullString{String: change.ID, Valid: true}
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		update sync_conflicts
+		set resolved_at = ?, resolved_change_id = ?
+		where conflict_id = ?`,
+		now.Format(time.RFC3339Nano), resolvedChangeID, conflictID); err != nil {
+		return fmt.Errorf("mark conflict resolved: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit resolve conflict: %w", err)
+	}
+	return s.RebuildProjection(ctx)
+}
+
+func chosenSide(conflict SyncConflict, use string) (string, error) {
+	switch use {
+	case "local":
+		return conflict.LocalChangeID, nil
+	case "remote":
+		return conflict.RemoteChangeID, nil
+	case conflict.LocalChangeID, conflict.RemoteChangeID:
+		return use, nil
+	default:
+		return "", fmt.Errorf("choose a side with local or remote")
+	}
+}
+
+// resolutionPayload reads the chosen change and turns it into the payload for a
+// task.resolved change: the chosen content, or a deletion marker.
+func (s *Store) resolutionPayload(ctx context.Context, tx *sql.Tx, changeID string) (changePayload, error) {
+	var changeType string
+	var ciphertext, nonce []byte
+	err := tx.QueryRowContext(ctx, `
+		select change_type, encrypted_payload, payload_nonce
+		from task_changes where change_id = ?`, changeID).Scan(&changeType, &ciphertext, &nonce)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return changePayload{}, fmt.Errorf("chosen change not found: %s", changeID)
+		}
+		return changePayload{}, fmt.Errorf("read chosen change: %w", err)
+	}
+	if changeType == "task.deleted" {
+		return changePayload{Deleted: true}, nil
+	}
+	payload, err := decryptChange(s.key, changeID, nonce, ciphertext)
+	if err != nil {
+		return changePayload{}, err
+	}
+	return changePayload{
+		Title:      payload.Title,
+		Body:       payload.Body,
+		Tags:       payload.Tags,
+		DueAt:      payload.DueAt,
+		ReminderAt: payload.ReminderAt,
+	}, nil
 }
 
 func (s *Store) ExportPlaintext(ctx context.Context) (PlaintextExport, error) {
@@ -704,10 +904,14 @@ func (s *Store) DeleteTask(ctx context.Context, id string) error {
 }
 
 func (s *Store) RebuildProjection(ctx context.Context) error {
+	// Replay in temporal order so the most recent edit by wall-clock wins.
+	// device_id and sequence only break ties deterministically. This makes a
+	// conflict resolution (a newer task.resolved change) supersede the forked
+	// edits it resolves, and keeps multi-device merges intuitive.
 	rows, err := s.db.QueryContext(ctx, `
 		select change_id, task_id, change_type, encrypted_payload, payload_nonce, created_at
 		from task_changes
-		order by device_id, sequence`)
+		order by created_at, device_id, sequence`)
 	if err != nil {
 		return fmt.Errorf("read task changes: %w", err)
 	}
@@ -896,6 +1100,7 @@ func migrate(ctx context.Context, db *sql.DB) error {
 			sequence integer not null,
 			task_id text not null,
 			change_type text not null,
+			parent_change_id text not null default '',
 			encrypted_payload blob not null,
 			payload_nonce blob not null,
 			payload_key_id text not null,
@@ -906,10 +1111,12 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		`create table if not exists sync_conflicts (
 			conflict_id text primary key,
 			conflict_type text not null,
+			task_id text not null default '',
 			device_id text not null,
 			sequence integer not null,
 			local_change_id text not null,
 			remote_change_id text not null,
+			resolved_change_id text,
 			created_at text not null,
 			resolved_at text,
 			unique(conflict_type, device_id, sequence, local_change_id, remote_change_id)
@@ -919,6 +1126,52 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		if _, err := db.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("migrate: %w", err)
 		}
+	}
+	// Additive column upgrades for databases created before these columns
+	// existed. SQLite cannot add them through `create table if not exists`.
+	columns := []struct{ table, column, ddl string }{
+		{"task_changes", "parent_change_id", "parent_change_id text not null default ''"},
+		{"sync_conflicts", "task_id", "task_id text not null default ''"},
+		{"sync_conflicts", "resolved_change_id", "resolved_change_id text"},
+	}
+	for _, c := range columns {
+		if err := ensureColumn(ctx, db, c.table, c.column, c.ddl); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func ensureColumn(ctx context.Context, db *sql.DB, table, column, ddl string) error {
+	rows, err := db.QueryContext(ctx, fmt.Sprintf("pragma table_info(%s)", table))
+	if err != nil {
+		return fmt.Errorf("inspect %s columns: %w", table, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			cid       int
+			name      string
+			colType   string
+			notNull   int
+			dfltValue sql.NullString
+			pk        int
+		)
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &dfltValue, &pk); err != nil {
+			return fmt.Errorf("scan %s column info: %w", table, err)
+		}
+		if name == column {
+			return rows.Close()
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("read %s column info: %w", table, err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close %s column info: %w", table, err)
+	}
+	if _, err := db.ExecContext(ctx, fmt.Sprintf("alter table %s add column %s", table, ddl)); err != nil {
+		return fmt.Errorf("add %s.%s column: %w", table, column, err)
 	}
 	return nil
 }
@@ -940,17 +1193,150 @@ func (s *Store) detectSequenceConflict(ctx context.Context, tx *sql.Tx, change E
 	}
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	_, err = tx.ExecContext(ctx, `
-		insert into sync_conflicts(conflict_id, conflict_type, device_id, sequence, local_change_id, remote_change_id, created_at)
-		values(?, 'duplicate_device_sequence', ?, ?, ?, ?, ?)
+		insert into sync_conflicts(conflict_id, conflict_type, task_id, device_id, sequence, local_change_id, remote_change_id, created_at)
+		values(?, 'duplicate_device_sequence', ?, ?, ?, ?, ?, ?)
 		on conflict(conflict_type, device_id, sequence, local_change_id, remote_change_id) do nothing`,
-		newID("conflict"), change.DeviceID, change.Sequence, localChangeID, change.ChangeID, now.Format(time.RFC3339Nano))
+		newID("conflict"), change.TaskID, change.DeviceID, change.Sequence, localChangeID, change.ChangeID, now.Format(time.RFC3339Nano))
 	if err != nil {
 		return false, fmt.Errorf("record sync conflict: %w", err)
 	}
 	return true, nil
 }
 
+// reconcileForkConflicts records and resolves divergence in each task's change
+// chain. A fork is two or more changes that share a parent — i.e. two devices
+// edited the same version of a task offline. Concurrent content edits and
+// delete/edit collisions become user-resolvable Sync Conflicts; lower-stakes
+// forks (status, tags) fall through to the temporal last-writer-wins replay.
+//
+// An open conflict is auto-resolved once a `task.resolved` change descends from
+// either side, which is how a resolution made on one device converges to the
+// others when its resolution change syncs in.
+func (s *Store) reconcileForkConflicts(ctx context.Context, tx *sql.Tx) error {
+	rows, err := tx.QueryContext(ctx, `
+		select task_id, parent_change_id
+		from task_changes
+		where parent_change_id != ''
+		group by task_id, parent_change_id
+		having count(*) > 1`)
+	if err != nil {
+		return fmt.Errorf("scan task change forks: %w", err)
+	}
+	type fork struct{ taskID, parent string }
+	var forks []fork
+	for rows.Next() {
+		var f fork
+		if err := rows.Scan(&f.taskID, &f.parent); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan fork: %w", err)
+		}
+		forks = append(forks, f)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("read forks: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close forks: %w", err)
+	}
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	for _, f := range forks {
+		children, err := s.forkChildren(ctx, tx, f.taskID, f.parent)
+		if err != nil {
+			return err
+		}
+		if len(children) < 2 {
+			continue
+		}
+		anchor := children[0]
+		for _, other := range children[1:] {
+			conflictType := classifyFork(anchor.changeType, other.changeType)
+			if conflictType == "" {
+				continue
+			}
+			_, err := tx.ExecContext(ctx, `
+				insert into sync_conflicts(conflict_id, conflict_type, task_id, device_id, sequence, local_change_id, remote_change_id, created_at)
+				values(?, ?, ?, ?, ?, ?, ?, ?)
+				on conflict(conflict_type, device_id, sequence, local_change_id, remote_change_id) do nothing`,
+				newID("conflict"), conflictType, f.taskID, other.deviceID, other.sequence, anchor.changeID, other.changeID, now.Format(time.RFC3339Nano))
+			if err != nil {
+				return fmt.Errorf("record fork conflict: %w", err)
+			}
+		}
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		update sync_conflicts
+		set resolved_at = ?
+		where resolved_at is null
+		  and conflict_type in ('concurrent_edit', 'delete_edit')
+		  and exists (
+			select 1 from task_changes tc
+			where tc.change_type = 'task.resolved'
+			  and (tc.parent_change_id = sync_conflicts.local_change_id
+				or tc.parent_change_id = sync_conflicts.remote_change_id))`,
+		now.Format(time.RFC3339Nano)); err != nil {
+		return fmt.Errorf("auto-resolve fork conflicts: %w", err)
+	}
+	return nil
+}
+
+type forkChild struct {
+	changeID   string
+	deviceID   string
+	sequence   int64
+	changeType string
+}
+
+func (s *Store) forkChildren(ctx context.Context, tx *sql.Tx, taskID, parent string) ([]forkChild, error) {
+	rows, err := tx.QueryContext(ctx, `
+		select change_id, device_id, sequence, change_type
+		from task_changes
+		where task_id = ? and parent_change_id = ?
+		order by change_id`, taskID, parent)
+	if err != nil {
+		return nil, fmt.Errorf("read fork children: %w", err)
+	}
+	defer rows.Close()
+	var children []forkChild
+	for rows.Next() {
+		var c forkChild
+		if err := rows.Scan(&c.changeID, &c.deviceID, &c.sequence, &c.changeType); err != nil {
+			return nil, fmt.Errorf("scan fork child: %w", err)
+		}
+		children = append(children, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read fork children: %w", err)
+	}
+	return children, nil
+}
+
+// classifyFork names the Sync Conflict for two changes that share a parent, or
+// returns "" when the divergence is safe to auto-merge.
+func classifyFork(a, b string) string {
+	if a == "task.deleted" || b == "task.deleted" {
+		return "delete_edit"
+	}
+	if a == "task.updated" && b == "task.updated" {
+		return "concurrent_edit"
+	}
+	return ""
+}
+
 func (s *Store) appendChange(ctx context.Context, tx *sql.Tx, taskID, changeType string, payload changePayload, now time.Time) (Change, error) {
+	parent, err := s.taskHead(ctx, tx, taskID)
+	if err != nil {
+		return Change{}, err
+	}
+	return s.appendChangeWithParent(ctx, tx, taskID, changeType, payload, parent, now)
+}
+
+// appendChangeWithParent records a change whose parent is set explicitly rather
+// than inferred from the current head. Conflict resolution uses this to descend
+// from the specific side it resolves.
+func (s *Store) appendChangeWithParent(ctx context.Context, tx *sql.Tx, taskID, changeType string, payload changePayload, parent string, now time.Time) (Change, error) {
 	deviceID, err := s.deviceID(ctx, tx)
 	if err != nil {
 		return Change{}, err
@@ -972,13 +1358,34 @@ func (s *Store) appendChange(ctx context.Context, tx *sql.Tx, taskID, changeType
 		return Change{}, err
 	}
 	_, err = tx.ExecContext(ctx, `
-		insert into task_changes(change_id, device_id, sequence, task_id, change_type, encrypted_payload, payload_nonce, payload_key_id, created_at, sync_state)
-		values(?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
-		change.ID, change.DeviceID, change.Sequence, change.TaskID, change.Type, ciphertext, nonce, payloadKeyID, now.Format(time.RFC3339Nano))
+		insert into task_changes(change_id, device_id, sequence, task_id, change_type, parent_change_id, encrypted_payload, payload_nonce, payload_key_id, created_at, sync_state)
+		values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
+		change.ID, change.DeviceID, change.Sequence, change.TaskID, change.Type, parent, ciphertext, nonce, payloadKeyID, now.Format(time.RFC3339Nano))
 	if err != nil {
 		return Change{}, fmt.Errorf("insert task change: %w", err)
 	}
 	return change, nil
+}
+
+// taskHead returns the change_id of the most recent change this device has
+// applied to a task, in the same temporal order replay uses. A new edit
+// records that change as its parent, so an edit made against an already-merged
+// state stays linear, while two edits made from the same base fork apart and
+// surface as a Sync Conflict.
+func (s *Store) taskHead(ctx context.Context, tx *sql.Tx, taskID string) (string, error) {
+	var head string
+	err := tx.QueryRowContext(ctx, `
+		select change_id from task_changes
+		where task_id = ?
+		order by created_at desc, device_id desc, sequence desc
+		limit 1`, taskID).Scan(&head)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", nil
+		}
+		return "", fmt.Errorf("read task head: %w", err)
+	}
+	return head, nil
 }
 
 func (s *Store) deviceID(ctx context.Context, tx *sql.Tx) (string, error) {
@@ -1131,6 +1538,40 @@ func (s *Store) replayChange(ctx context.Context, tx *sql.Tx, taskID, changeType
 			at.Format(time.RFC3339Nano), at.Format(time.RFC3339Nano), taskID)
 		if err != nil {
 			return fmt.Errorf("replay delete task: %w", err)
+		}
+		return nil
+	case "task.resolved":
+		if payload.Deleted {
+			_, err := tx.ExecContext(ctx, `
+				update tasks set deleted_at = ?, updated_at = ?
+				where task_id = ?`,
+				at.Format(time.RFC3339Nano), at.Format(time.RFC3339Nano), taskID)
+			if err != nil {
+				return fmt.Errorf("replay resolve delete: %w", err)
+			}
+			return nil
+		}
+		current, err := s.taskPayloadInTx(ctx, tx, taskID)
+		if err != nil {
+			return err
+		}
+		current.Title = payload.Title
+		current.Body = payload.Body
+		current.Tags = append([]string(nil), payload.Tags...)
+		current.DueAt = cloneTime(payload.DueAt)
+		current.ReminderAt = cloneTime(payload.ReminderAt)
+		nonce, ciphertext, err := encryptTask(s.key, taskID, current)
+		if err != nil {
+			return err
+		}
+		// A content resolution also revives a task that the losing side had
+		// deleted, so choosing the edit over a delete restores the task.
+		_, err = tx.ExecContext(ctx, `
+			update tasks set encrypted_payload = ?, payload_nonce = ?, payload_key_id = ?, deleted_at = null, updated_at = ?
+			where task_id = ?`,
+			ciphertext, nonce, payloadKeyID, at.Format(time.RFC3339Nano), taskID)
+		if err != nil {
+			return fmt.Errorf("replay resolve task: %w", err)
 		}
 		return nil
 	default:

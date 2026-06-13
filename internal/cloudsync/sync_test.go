@@ -329,6 +329,220 @@ func TestPullDuplicateDeviceSequenceRecordsConflict(t *testing.T) {
 	}
 }
 
+// newSharedDevices creates device A with one task, pushes, then restores
+// device B from the same encrypted artifacts so both share the task and key.
+func newSharedDevices(t *testing.T, ctx context.Context, secret, title, body string) (*storage.Store, *storage.Store, LocalDirClient, string) {
+	t.Helper()
+	syncDir := t.TempDir()
+	client := LocalDirClient{Dir: syncDir}
+
+	dbA := filepath.Join(t.TempDir(), "a.db")
+	if err := storage.Init(ctx, dbA, secret); err != nil {
+		t.Fatalf("init A: %v", err)
+	}
+	deviceA, err := storage.Open(ctx, dbA, secret)
+	if err != nil {
+		t.Fatalf("open A: %v", err)
+	}
+	t.Cleanup(func() { deviceA.Close() })
+	task, err := deviceA.AddTask(ctx, title, body)
+	if err != nil {
+		t.Fatalf("add shared task: %v", err)
+	}
+	if err := Push(ctx, deviceA, client); err != nil {
+		t.Fatalf("push A: %v", err)
+	}
+
+	dbB := filepath.Join(t.TempDir(), "b.db")
+	manifest, err := ReadManifest(ctx, client)
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	if err := storage.InitWithManifest(ctx, dbB, secret, manifest); err != nil {
+		t.Fatalf("init B: %v", err)
+	}
+	deviceB, err := storage.Open(ctx, dbB, secret)
+	if err != nil {
+		t.Fatalf("open B: %v", err)
+	}
+	t.Cleanup(func() { deviceB.Close() })
+	if err := Pull(ctx, deviceB, client); err != nil {
+		t.Fatalf("pull B: %v", err)
+	}
+	return deviceA, deviceB, client, task.ID
+}
+
+func sideForDevice(t *testing.T, detail storage.ConflictDetail, deviceID string) string {
+	t.Helper()
+	switch deviceID {
+	case detail.Local.DeviceID:
+		return detail.Local.Label
+	case detail.Remote.DeviceID:
+		return detail.Remote.Label
+	default:
+		t.Fatalf("device %s is not a side of conflict %s", deviceID, detail.ID)
+		return ""
+	}
+}
+
+func TestConcurrentBodyEditsBecomeResolvableConflict(t *testing.T) {
+	ctx := context.Background()
+	deviceA, deviceB, client, taskID := newSharedDevices(t, ctx, "edit secret", "Shared note", "base body")
+
+	// Both devices edit the same task body offline from the same base.
+	if _, err := deviceA.EditTask(ctx, taskID, "Shared note", "body from A"); err != nil {
+		t.Fatalf("edit A: %v", err)
+	}
+	if _, err := deviceB.EditTask(ctx, taskID, "Shared note", "body from B"); err != nil {
+		t.Fatalf("edit B: %v", err)
+	}
+	if err := Push(ctx, deviceB, client); err != nil {
+		t.Fatalf("push B: %v", err)
+	}
+	if err := Push(ctx, deviceA, client); err != nil {
+		t.Fatalf("push A: %v", err)
+	}
+
+	// A pulls B's divergent edit and must see a resolvable conflict that
+	// preserves both bodies.
+	if err := Pull(ctx, deviceA, client); err != nil {
+		t.Fatalf("pull A: %v", err)
+	}
+	details, err := deviceA.ListConflictDetails(ctx)
+	if err != nil {
+		t.Fatalf("list conflicts A: %v", err)
+	}
+	if len(details) != 1 || details[0].Type != "concurrent_edit" {
+		t.Fatalf("expected one concurrent_edit conflict, got %#v", details)
+	}
+	bodies := map[string]bool{details[0].Local.Body: true, details[0].Remote.Body: true}
+	if !bodies["body from A"] || !bodies["body from B"] {
+		t.Fatalf("conflict did not preserve both bodies: %#v", details[0])
+	}
+
+	// A resolves in favor of B's version.
+	deviceBID, err := deviceB.LocalDeviceID(ctx)
+	if err != nil {
+		t.Fatalf("device B id: %v", err)
+	}
+	if err := deviceA.ResolveConflict(ctx, details[0].ID, sideForDevice(t, details[0], deviceBID)); err != nil {
+		t.Fatalf("resolve A: %v", err)
+	}
+	resolved, err := deviceA.GetTask(ctx, taskID)
+	if err != nil {
+		t.Fatalf("get resolved A: %v", err)
+	}
+	if resolved.Body != "body from B" {
+		t.Fatalf("A projection did not reflect chosen side: %q", resolved.Body)
+	}
+	openA, err := deviceA.ListConflicts(ctx)
+	if err != nil {
+		t.Fatalf("list open A: %v", err)
+	}
+	if len(openA) != 0 {
+		t.Fatalf("conflict still open on A after resolve: %#v", openA)
+	}
+
+	// The resolution converges to B once it syncs in.
+	if err := Push(ctx, deviceA, client); err != nil {
+		t.Fatalf("re-push A: %v", err)
+	}
+	if err := Pull(ctx, deviceB, client); err != nil {
+		t.Fatalf("pull B: %v", err)
+	}
+	convergedB, err := deviceB.GetTask(ctx, taskID)
+	if err != nil {
+		t.Fatalf("get converged B: %v", err)
+	}
+	if convergedB.Body != "body from B" {
+		t.Fatalf("B did not converge to resolved body: %q", convergedB.Body)
+	}
+	openB, err := deviceB.ListConflicts(ctx)
+	if err != nil {
+		t.Fatalf("list open B: %v", err)
+	}
+	if len(openB) != 0 {
+		t.Fatalf("conflict still open on B after convergence: %#v", openB)
+	}
+}
+
+func TestDeleteEditCollisionCreatesConflict(t *testing.T) {
+	ctx := context.Background()
+	deviceA, deviceB, client, taskID := newSharedDevices(t, ctx, "delete secret", "Contested task", "base body")
+
+	if err := deviceA.DeleteTask(ctx, taskID); err != nil {
+		t.Fatalf("delete A: %v", err)
+	}
+	if _, err := deviceB.EditTask(ctx, taskID, "Contested task", "meaningful edit from B"); err != nil {
+		t.Fatalf("edit B: %v", err)
+	}
+	if err := Push(ctx, deviceB, client); err != nil {
+		t.Fatalf("push B: %v", err)
+	}
+	if err := Pull(ctx, deviceA, client); err != nil {
+		t.Fatalf("pull A: %v", err)
+	}
+
+	details, err := deviceA.ListConflictDetails(ctx)
+	if err != nil {
+		t.Fatalf("list conflicts A: %v", err)
+	}
+	if len(details) != 1 || details[0].Type != "delete_edit" {
+		t.Fatalf("expected one delete_edit conflict, got %#v", details)
+	}
+
+	// Resolving to the edit revives the task with B's content.
+	deviceBID, err := deviceB.LocalDeviceID(ctx)
+	if err != nil {
+		t.Fatalf("device B id: %v", err)
+	}
+	if err := deviceA.ResolveConflict(ctx, details[0].ID, sideForDevice(t, details[0], deviceBID)); err != nil {
+		t.Fatalf("resolve A: %v", err)
+	}
+	revived, err := deviceA.GetTask(ctx, taskID)
+	if err != nil {
+		t.Fatalf("get revived task: %v", err)
+	}
+	if revived.Body != "meaningful edit from B" {
+		t.Fatalf("resolve to edit did not revive task content: %#v", revived)
+	}
+}
+
+func TestDifferentFieldForkAutoMerges(t *testing.T) {
+	ctx := context.Background()
+	deviceA, deviceB, client, taskID := newSharedDevices(t, ctx, "merge secret", "Mergeable task", "base body")
+
+	// A toggles completion; B edits content. Different fields from the same
+	// base must auto-merge without a conflict.
+	if _, err := deviceA.SetTaskStatus(ctx, taskID, "done"); err != nil {
+		t.Fatalf("status A: %v", err)
+	}
+	if _, err := deviceB.EditTask(ctx, taskID, "Mergeable task", "edited body from B"); err != nil {
+		t.Fatalf("edit B: %v", err)
+	}
+	if err := Push(ctx, deviceB, client); err != nil {
+		t.Fatalf("push B: %v", err)
+	}
+	if err := Pull(ctx, deviceA, client); err != nil {
+		t.Fatalf("pull A: %v", err)
+	}
+
+	open, err := deviceA.ListConflicts(ctx)
+	if err != nil {
+		t.Fatalf("list conflicts A: %v", err)
+	}
+	if len(open) != 0 {
+		t.Fatalf("expected auto-merge with no conflict, got %#v", open)
+	}
+	merged, err := deviceA.GetTask(ctx, taskID)
+	if err != nil {
+		t.Fatalf("get merged task: %v", err)
+	}
+	if merged.Status != "done" || merged.Body != "edited body from B" {
+		t.Fatalf("auto-merge lost a field edit: status=%q body=%q", merged.Status, merged.Body)
+	}
+}
+
 type failingClient struct {
 	failName   string
 	failPrefix string
