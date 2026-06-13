@@ -72,7 +72,8 @@ Current status:
 
 - Local fake-Drive sync artifacts are implemented through `sync push -dir`, `sync pull -dir`, and `sync restore -dir`.
 - Protected change artifacts are encrypted and authenticated.
-- Google OAuth and the real Drive client are not implemented yet.
+- Google OAuth and the Drive app-data client are implemented behind `login google`, `logout google`, and `sync * -google -credentials <file>`.
+- Live Google verification still requires real OAuth desktop credentials and a Google account.
 
 ## Phase 4: Multi-Device Restore and Conflict UX
 

@@ -186,7 +186,8 @@ Current implementation note:
 
 - `manifest.json` is plaintext but must contain only non-sensitive collection metadata such as format version and KDF salt.
 - Task content and Task Changes are stored in encrypted authenticated artifacts.
-- `sync push -dir`, `sync pull -dir`, and `sync restore -dir` use a local directory as a fake Drive app-data folder until the Google Drive client is implemented.
+- `sync push -dir`, `sync pull -dir`, and `sync restore -dir` use a local directory as a fake Drive app-data folder for deterministic tests.
+- `sync push -google -credentials <file>`, `sync pull -google -credentials <file>`, and `sync restore -google -credentials <file>` use Google Drive app data storage after `login google`.
 
 Each encrypted change file should contain newline-delimited canonical JSON records before encryption:
 
@@ -269,6 +270,7 @@ Drive behavior:
 - Do not request full Drive access.
 - Do not create user-visible task files in My Drive for v1 sync.
 - OAuth tokens grant cloud storage access only; they do not unlock task content.
+- OAuth tokens are stored in the OS keychain.
 
 References:
 

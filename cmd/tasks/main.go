@@ -9,8 +9,12 @@ import (
 	"strings"
 
 	"tasks-remote/internal/cloudsync"
+	"tasks-remote/internal/googleauth"
 	"tasks-remote/internal/storage"
 	"tasks-remote/internal/unlock"
+
+	drive "google.golang.org/api/drive/v3"
+	"google.golang.org/api/option"
 )
 
 func main() {
@@ -213,11 +217,47 @@ func run(ctx context.Context, args []string) error {
 		return nil
 	case "sync":
 		return runSync(ctx, *dbPath, commandArgs)
-	case "login", "logout", "conflicts", "export", "tag":
+	case "login":
+		return runLogin(ctx, commandArgs)
+	case "logout":
+		return runLogout(commandArgs)
+	case "conflicts", "export", "tag":
 		return fmt.Errorf("%s is planned but not implemented yet", command)
 	default:
 		return fmt.Errorf("unknown command: %s", command)
 	}
+}
+
+func runLogin(ctx context.Context, args []string) error {
+	if len(args) == 0 || args[0] != "google" {
+		return fmt.Errorf("only login google is implemented")
+	}
+	loginFlags := flag.NewFlagSet("login google", flag.ContinueOnError)
+	loginFlags.SetOutput(os.Stderr)
+	credentials := loginFlags.String("credentials", "", "Google OAuth desktop client credentials JSON")
+	if err := loginFlags.Parse(args[1:]); err != nil {
+		return err
+	}
+	config, err := googleauth.ConfigFromCredentialsFile(*credentials)
+	if err != nil {
+		return err
+	}
+	if err := googleauth.Login(ctx, config); err != nil {
+		return err
+	}
+	fmt.Println("google login complete")
+	return nil
+}
+
+func runLogout(args []string) error {
+	if len(args) == 0 || args[0] != "google" {
+		return fmt.Errorf("only logout google is implemented")
+	}
+	if err := googleauth.Logout(); err != nil {
+		return err
+	}
+	fmt.Println("google logout complete")
+	return nil
 }
 
 func runSync(ctx context.Context, dbPath string, args []string) error {
@@ -246,57 +286,65 @@ func runSync(ctx context.Context, dbPath string, args []string) error {
 		syncFlags := flag.NewFlagSet("sync push", flag.ContinueOnError)
 		syncFlags.SetOutput(os.Stderr)
 		dir := syncFlags.String("dir", "", "local sync directory")
+		useGoogle := syncFlags.Bool("google", false, "use Google Drive app data folder")
+		credentials := syncFlags.String("credentials", "", "Google OAuth desktop client credentials JSON")
 		if err := syncFlags.Parse(args[1:]); err != nil {
 			return err
 		}
-		if *dir == "" {
-			return fmt.Errorf("sync push requires -dir")
+		client, err := syncClient(ctx, *dir, *useGoogle, *credentials)
+		if err != nil {
+			return err
 		}
 		store, err := openStore(ctx, dbPath)
 		if err != nil {
 			return err
 		}
 		defer store.Close()
-		if err := cloudsync.Push(ctx, store, cloudsync.LocalDirClient{Dir: *dir}); err != nil {
+		if err := cloudsync.Push(ctx, store, client); err != nil {
 			return err
 		}
-		fmt.Printf("pushed sync artifacts to %s\n", *dir)
+		fmt.Println("pushed sync artifacts")
 		return nil
 	case "pull":
 		syncFlags := flag.NewFlagSet("sync pull", flag.ContinueOnError)
 		syncFlags.SetOutput(os.Stderr)
 		dir := syncFlags.String("dir", "", "local sync directory")
+		useGoogle := syncFlags.Bool("google", false, "use Google Drive app data folder")
+		credentials := syncFlags.String("credentials", "", "Google OAuth desktop client credentials JSON")
 		if err := syncFlags.Parse(args[1:]); err != nil {
 			return err
 		}
-		if *dir == "" {
-			return fmt.Errorf("sync pull requires -dir")
+		client, err := syncClient(ctx, *dir, *useGoogle, *credentials)
+		if err != nil {
+			return err
 		}
 		store, err := openStore(ctx, dbPath)
 		if err != nil {
 			return err
 		}
 		defer store.Close()
-		if err := cloudsync.Pull(ctx, store, cloudsync.LocalDirClient{Dir: *dir}); err != nil {
+		if err := cloudsync.Pull(ctx, store, client); err != nil {
 			return err
 		}
-		fmt.Printf("pulled sync artifacts from %s\n", *dir)
+		fmt.Println("pulled sync artifacts")
 		return nil
 	case "restore":
 		syncFlags := flag.NewFlagSet("sync restore", flag.ContinueOnError)
 		syncFlags.SetOutput(os.Stderr)
 		dir := syncFlags.String("dir", "", "local sync directory")
+		useGoogle := syncFlags.Bool("google", false, "use Google Drive app data folder")
+		credentials := syncFlags.String("credentials", "", "Google OAuth desktop client credentials JSON")
 		if err := syncFlags.Parse(args[1:]); err != nil {
 			return err
 		}
-		if *dir == "" {
-			return fmt.Errorf("sync restore requires -dir")
+		client, err := syncClient(ctx, *dir, *useGoogle, *credentials)
+		if err != nil {
+			return err
 		}
 		secret, err := inputRecoverySecret()
 		if err != nil {
 			return err
 		}
-		client := cloudsync.LocalDirClient{Dir: *dir}
 		manifest, err := cloudsync.ReadManifest(ctx, client)
 		if err != nil {
 			return err
@@ -320,11 +368,33 @@ func runSync(ctx context.Context, dbPath string, args []string) error {
 				return err
 			}
 		}
-		fmt.Printf("restored sync artifacts from %s\n", *dir)
+		fmt.Println("restored sync artifacts")
 		return nil
 	default:
 		return fmt.Errorf("unknown sync subcommand: %s", args[0])
 	}
+}
+
+func syncClient(ctx context.Context, dir string, useGoogle bool, credentialsPath string) (cloudsync.Client, error) {
+	if useGoogle {
+		config, err := googleauth.ConfigFromCredentialsFile(credentialsPath)
+		if err != nil {
+			return nil, err
+		}
+		source, err := googleauth.TokenSource(ctx, config)
+		if err != nil {
+			return nil, err
+		}
+		service, err := drive.NewService(ctx, option.WithTokenSource(source))
+		if err != nil {
+			return nil, fmt.Errorf("create google drive service: %w", err)
+		}
+		return cloudsync.GoogleDriveClient{Service: service}, nil
+	}
+	if dir == "" {
+		return nil, fmt.Errorf("sync requires -dir or -google")
+	}
+	return cloudsync.LocalDirClient{Dir: dir}, nil
 }
 
 func openStore(ctx context.Context, dbPath string) (*storage.Store, error) {
@@ -380,6 +450,8 @@ implemented:
   sync push -dir <path>
   sync pull -dir <path>
   sync restore -dir <path>
+  login google -credentials <file>
+  logout google
 
 unlock:
   run unlock once per database, or set TASKS_REMOTE_SECRET for automation`)

@@ -60,11 +60,19 @@ func (c LocalDirClient) path(name string) (string, error) {
 	if c.Dir == "" {
 		return "", fmt.Errorf("sync directory is required")
 	}
+	if err := validateArtifactName(name); err != nil {
+		return "", err
+	}
+	clean := filepath.Clean(name)
+	return filepath.Join(c.Dir, clean), nil
+}
+
+func validateArtifactName(name string) error {
 	clean := filepath.Clean(name)
 	if clean == "." || filepath.IsAbs(clean) || clean != name {
-		return "", fmt.Errorf("invalid sync artifact name: %s", name)
+		return fmt.Errorf("invalid sync artifact name: %s", name)
 	}
-	return filepath.Join(c.Dir, clean), nil
+	return nil
 }
 
 func Push(ctx context.Context, store *storage.Store, client Client) error {
