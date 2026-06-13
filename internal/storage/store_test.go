@@ -430,6 +430,60 @@ func TestPlaintextExportIncludesActiveSensitiveData(t *testing.T) {
 	}
 }
 
+func TestRemindersClassifyDueAndUpcoming(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "tasks.db")
+	secret := "reminder secret"
+
+	if err := Init(ctx, dbPath, secret); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	store, err := Open(ctx, dbPath, secret)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer store.Close()
+
+	now := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
+	overdue := now.Add(-2 * time.Hour)
+	soon := now.Add(3 * time.Hour)
+	later := now.Add(72 * time.Hour)
+
+	if _, err := store.AddTaskWithInput(ctx, TaskInput{Title: "Overdue call", ReminderAt: &overdue}); err != nil {
+		t.Fatalf("add overdue: %v", err)
+	}
+	if _, err := store.AddTaskWithInput(ctx, TaskInput{Title: "Upcoming errand", ReminderAt: &soon}); err != nil {
+		t.Fatalf("add soon: %v", err)
+	}
+	if _, err := store.AddTaskWithInput(ctx, TaskInput{Title: "Far future", ReminderAt: &later}); err != nil {
+		t.Fatalf("add later: %v", err)
+	}
+	if _, err := store.AddTask(ctx, "No reminder", ""); err != nil {
+		t.Fatalf("add no reminder: %v", err)
+	}
+	done, err := store.AddTaskWithInput(ctx, TaskInput{Title: "Done overdue", ReminderAt: &overdue})
+	if err != nil {
+		t.Fatalf("add done: %v", err)
+	}
+	if _, err := store.SetTaskStatus(ctx, done.ID, "done"); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+
+	reminders, err := store.Reminders(ctx, now, 24*time.Hour)
+	if err != nil {
+		t.Fatalf("reminders: %v", err)
+	}
+	if len(reminders) != 2 {
+		t.Fatalf("expected overdue + upcoming, got %#v", reminders)
+	}
+	if reminders[0].Task.Title != "Overdue call" || !reminders[0].Due {
+		t.Fatalf("first reminder should be the overdue one: %#v", reminders[0])
+	}
+	if reminders[1].Task.Title != "Upcoming errand" || reminders[1].Due {
+		t.Fatalf("second reminder should be upcoming: %#v", reminders[1])
+	}
+}
+
 func TestReadSyncStatusDoesNotNeedRecoverySecret(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "tasks.db")

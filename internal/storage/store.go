@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -616,6 +617,43 @@ func (s *Store) resolutionPayload(ctx context.Context, tx *sql.Tx, changeID stri
 		DueAt:      payload.DueAt,
 		ReminderAt: payload.ReminderAt,
 	}, nil
+}
+
+// DueReminder is an active task with a reminder that is due or upcoming.
+type DueReminder struct {
+	Task Task
+	// Due is true when the reminder time has already passed, false when it
+	// falls inside the upcoming window.
+	Due bool
+}
+
+// Reminders returns active (open, not deleted) tasks whose reminder time has
+// passed as of asOf, or falls within the upcoming window, sorted soonest
+// first. It is the read side of reminder delivery; surfacing or notifying is
+// left to the caller.
+func (s *Store) Reminders(ctx context.Context, asOf time.Time, within time.Duration) ([]DueReminder, error) {
+	tasks, err := s.ListTasks(ctx)
+	if err != nil {
+		return nil, err
+	}
+	cutoff := asOf.Add(within)
+	var reminders []DueReminder
+	for _, task := range tasks {
+		if task.Status == "done" || task.ReminderAt == nil {
+			continue
+		}
+		remindAt := *task.ReminderAt
+		switch {
+		case !remindAt.After(asOf):
+			reminders = append(reminders, DueReminder{Task: task, Due: true})
+		case !remindAt.After(cutoff):
+			reminders = append(reminders, DueReminder{Task: task, Due: false})
+		}
+	}
+	sort.Slice(reminders, func(i, j int) bool {
+		return reminders[i].Task.ReminderAt.Before(*reminders[j].Task.ReminderAt)
+	})
+	return reminders, nil
 }
 
 func (s *Store) ExportPlaintext(ctx context.Context) (PlaintextExport, error) {

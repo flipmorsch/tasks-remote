@@ -12,6 +12,7 @@ import (
 
 	"tasks-remote/internal/cloudsync"
 	"tasks-remote/internal/googleauth"
+	"tasks-remote/internal/notify"
 	"tasks-remote/internal/storage"
 	"tasks-remote/internal/unlock"
 
@@ -260,6 +261,8 @@ func run(ctx context.Context, args []string) error {
 		return runSync(ctx, *dbPath, commandArgs)
 	case "conflicts":
 		return runConflicts(ctx, *dbPath, commandArgs)
+	case "reminders":
+		return runReminders(ctx, *dbPath, commandArgs)
 	case "tag":
 		return runTag(ctx, *dbPath, commandArgs)
 	case "login":
@@ -342,6 +345,68 @@ func runTag(ctx context.Context, dbPath string, args []string) error {
 	default:
 		return fmt.Errorf("unknown tag subcommand: %s", args[0])
 	}
+}
+
+func runReminders(ctx context.Context, dbPath string, args []string) error {
+	reminderFlags := flag.NewFlagSet("reminders", flag.ContinueOnError)
+	reminderFlags.SetOutput(os.Stderr)
+	within := reminderFlags.Duration("within", 24*time.Hour, "also show reminders coming due within this window")
+	doNotify := reminderFlags.Bool("notify", false, "send a desktop notification for each due reminder")
+	if err := reminderFlags.Parse(args); err != nil {
+		return err
+	}
+	store, err := openStore(ctx, dbPath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	reminders, err := store.Reminders(ctx, time.Now().UTC(), *within)
+	if err != nil {
+		return err
+	}
+	if len(reminders) == 0 {
+		fmt.Println("no reminders due")
+		return nil
+	}
+	for _, reminder := range reminders {
+		label := "SOON"
+		if reminder.Due {
+			label = "DUE "
+		}
+		fmt.Printf("%s %s %s%s\n", label, reminder.Task.ID, reminder.Task.Title, formatReminderAt(reminder.Task))
+	}
+	if *doNotify {
+		notifyDueReminders(reminders)
+	}
+	return nil
+}
+
+// notifyDueReminders fires a best-effort desktop notification per already-due
+// reminder. Notification failures are reported but never fail the command, so
+// a missing notifier cannot block reminder review. Reminders re-notify on each
+// run until the task is completed; schedule the command at your preferred
+// cadence (cron/systemd/launchd) to control how often you are reminded.
+func notifyDueReminders(reminders []storage.DueReminder) {
+	for _, reminder := range reminders {
+		if !reminder.Due {
+			continue
+		}
+		body := "Reminder due"
+		if reminder.Task.ReminderAt != nil {
+			body = "Reminder due " + reminder.Task.ReminderAt.Format("2006-01-02 15:04")
+		}
+		if err := notify.Send(reminder.Task.Title, body); err != nil {
+			fmt.Fprintf(os.Stderr, "tasks: notification skipped: %v\n", err)
+			return
+		}
+	}
+}
+
+func formatReminderAt(task storage.Task) string {
+	if task.ReminderAt == nil {
+		return ""
+	}
+	return " remind:" + task.ReminderAt.Format("2006-01-02")
 }
 
 func runConflicts(ctx context.Context, dbPath string, args []string) error {
@@ -704,6 +769,7 @@ implemented:
   search <query>
   conflicts
   conflicts resolve <conflict-id> --use local|remote
+  reminders [-within dur] [-notify]
   sync status
   sync push -dir <path>
   sync pull -dir <path>

@@ -83,6 +83,7 @@ Current implementation note:
 - Task tags are treated as Sensitive Task Data and stored inside encrypted task and change payloads.
 - Due dates and reminder dates are treated as Sensitive Task Data and stored inside encrypted task and change payloads.
 - `tasks export -out <path> --confirm-plaintext` writes active tasks to a new plaintext JSON file and refuses to overwrite an existing path.
+- `tasks reminders [-within <dur>] [-notify]` lists due and upcoming reminders on an Unlocked Device; `-notify` additionally sends best-effort desktop notifications.
 
 ## Storage Architecture
 
@@ -354,6 +355,9 @@ Manual acceptance:
 ## Open Decisions
 
 - Final binary name.
-- Whether v1 supports reminders as local notifications or only stored reminder dates.
 - Exact supported keychain platform matrix.
 - Whether a later whole-database encrypted SQLite spike should target SQLCipher or another maintained option.
+
+## Resolved Decisions
+
+- Reminder delivery: v1 surfaces reminders through `tasks reminders`, which lists due and upcoming reminders on an Unlocked Device. An opt-in `-notify` flag fires best-effort OS notifications (title only). There is no long-running daemon; the command is scheduled by the OS (cron/systemd/launchd) at the user's preferred cadence.

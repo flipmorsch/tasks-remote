@@ -28,7 +28,8 @@ Current status:
 - Guarded plaintext JSON export is implemented.
 - OS keychain-backed `unlock` and `lock` are implemented.
 - `TASKS_REMOTE_SECRET` remains available for automation.
-- Local notification delivery and conflict resolution are not implemented yet.
+- Reminder surfacing is implemented through `tasks reminders` with opt-in desktop notifications.
+- Conflict detection and resolution are implemented (see Phase 4).
 
 ## Phase 2: Task Change Log and Replay
 
