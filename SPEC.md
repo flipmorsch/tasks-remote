@@ -74,6 +74,13 @@ Command behavior:
 - `tasks sync status` must work when locked, but it must not print Sensitive Task Data.
 - `tasks export` must default to an explicit plaintext warning and require confirmation.
 
+Current implementation note:
+
+- `TASKS_REMOTE_SECRET` is supported for non-interactive automation.
+- Interactive unlock caches recovery material in the OS keychain.
+- `tasks lock` clears the cached OS keychain entry for the selected database.
+- Keychain entries are scoped by local database path.
+
 ## Storage Architecture
 
 SQLite is the local projection of the Task Collection. Google Drive sync stores encrypted Task Changes and sync metadata, not a SQLite database file.
@@ -327,5 +334,5 @@ Manual acceptance:
 - Final binary name.
 - Whether v1 supports reminders as local notifications or only stored reminder dates.
 - Whether plaintext export is in v1 or delayed until recovery/export UX is stronger.
-- Exact keychain library and platform support matrix.
+- Exact supported keychain platform matrix.
 - Whether a later whole-database encrypted SQLite spike should target SQLCipher or another maintained option.

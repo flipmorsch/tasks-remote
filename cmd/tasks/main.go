@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"tasks-remote/internal/storage"
+	"tasks-remote/internal/unlock"
 )
 
 func main() {
@@ -35,14 +36,44 @@ func run(ctx context.Context, args []string) error {
 
 	switch command {
 	case "init":
-		secret, err := recoverySecret()
+		secret, err := inputRecoverySecret()
 		if err != nil {
 			return err
 		}
 		if err := storage.Init(ctx, *dbPath, secret); err != nil {
 			return err
 		}
+		if !secretFromEnv() {
+			if err := unlock.Save(*dbPath, secret); err != nil {
+				return err
+			}
+		}
 		fmt.Printf("initialized %s\n", *dbPath)
+		return nil
+	case "unlock":
+		secret, err := inputRecoverySecret()
+		if err != nil {
+			return err
+		}
+		store, err := storage.Open(ctx, *dbPath, secret)
+		if err != nil {
+			return err
+		}
+		if err := store.Close(); err != nil {
+			return err
+		}
+		if !secretFromEnv() {
+			if err := unlock.Save(*dbPath, secret); err != nil {
+				return err
+			}
+		}
+		fmt.Println("unlocked")
+		return nil
+	case "lock":
+		if err := unlock.Clear(*dbPath); err != nil {
+			return err
+		}
+		fmt.Println("locked")
 		return nil
 	case "add":
 		addFlags := flag.NewFlagSet("add", flag.ContinueOnError)
@@ -196,7 +227,7 @@ func run(ctx context.Context, args []string) error {
 			fmt.Printf("last change: %s\n", status.LastChangeAt.Format("2006-01-02T15:04:05Z07:00"))
 		}
 		return nil
-	case "lock", "unlock", "login", "logout", "conflicts", "export", "tag":
+	case "login", "logout", "conflicts", "export", "tag":
 		return fmt.Errorf("%s is planned but not implemented yet", command)
 	default:
 		return fmt.Errorf("unknown command: %s", command)
@@ -204,19 +235,26 @@ func run(ctx context.Context, args []string) error {
 }
 
 func openStore(ctx context.Context, dbPath string) (*storage.Store, error) {
-	secret, err := recoverySecret()
+	secret, err := recoverySecret(dbPath)
 	if err != nil {
 		return nil, err
 	}
 	return storage.Open(ctx, dbPath, secret)
 }
 
-func recoverySecret() (string, error) {
-	secret := os.Getenv("TASKS_REMOTE_SECRET")
-	if secret == "" {
-		return "", fmt.Errorf("TASKS_REMOTE_SECRET is required until keychain unlock is implemented")
+func recoverySecret(dbPath string) (string, error) {
+	return unlock.Load(dbPath)
+}
+
+func inputRecoverySecret() (string, error) {
+	if secret := os.Getenv(unlock.EnvSecret); secret != "" {
+		return secret, nil
 	}
-	return secret, nil
+	return unlock.Prompt("Recovery secret")
+}
+
+func secretFromEnv() bool {
+	return os.Getenv(unlock.EnvSecret) != ""
 }
 
 func defaultDBPath() string {
@@ -235,6 +273,8 @@ func usage() {
 
 implemented:
   init
+  unlock
+  lock
   add [-body text] <title>
   edit [-body text] <task-id> <title>
   done <task-id>
@@ -245,6 +285,6 @@ implemented:
   search <query>
   sync status
 
-temporary unlock:
-  set TASKS_REMOTE_SECRET until keychain unlock is implemented`)
+unlock:
+  run unlock once per database, or set TASKS_REMOTE_SECRET for automation`)
 }

@@ -20,6 +20,13 @@ Acceptance:
 - Wrong Recovery Secret cannot decrypt data.
 - Plaintext task titles and bodies do not appear in local database, WAL, temp files, logs, or test sync artifacts.
 
+Current status:
+
+- Basic offline task commands are implemented.
+- OS keychain-backed `unlock` and `lock` are implemented.
+- `TASKS_REMOTE_SECRET` remains available for automation.
+- Tags, reminders, Google Drive sync, and conflict resolution are not implemented yet.
+
 ## Phase 2: Task Change Log and Replay
 
 Make local data rebuildable from Task Changes before adding Google Drive.
