@@ -68,6 +68,12 @@ Acceptance:
 - Interrupted uploads are retryable.
 - `tasks sync status` works while locked without revealing task content.
 
+Current status:
+
+- Local fake-Drive sync artifacts are implemented through `sync push -dir`, `sync pull -dir`, and `sync restore -dir`.
+- Protected change artifacts are encrypted and authenticated.
+- Google OAuth and the real Drive client are not implemented yet.
+
 ## Phase 4: Multi-Device Restore and Conflict UX
 
 Make the product useful across machines.

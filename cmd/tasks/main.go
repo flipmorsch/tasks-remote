@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"tasks-remote/internal/cloudsync"
 	"tasks-remote/internal/storage"
 	"tasks-remote/internal/unlock"
 )
@@ -211,10 +212,24 @@ func run(ctx context.Context, args []string) error {
 		fmt.Printf("deleted %s\n", commandArgs[0])
 		return nil
 	case "sync":
-		if len(commandArgs) != 1 || commandArgs[0] != "status" {
-			return fmt.Errorf("only sync status is implemented")
+		return runSync(ctx, *dbPath, commandArgs)
+	case "login", "logout", "conflicts", "export", "tag":
+		return fmt.Errorf("%s is planned but not implemented yet", command)
+	default:
+		return fmt.Errorf("unknown command: %s", command)
+	}
+}
+
+func runSync(ctx context.Context, dbPath string, args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("sync requires a subcommand")
+	}
+	switch args[0] {
+	case "status":
+		if len(args) != 1 {
+			return fmt.Errorf("sync status does not accept arguments")
 		}
-		status, err := storage.ReadSyncStatus(ctx, *dbPath)
+		status, err := storage.ReadSyncStatus(ctx, dbPath)
 		if err != nil {
 			return err
 		}
@@ -227,10 +242,88 @@ func run(ctx context.Context, args []string) error {
 			fmt.Printf("last change: %s\n", status.LastChangeAt.Format("2006-01-02T15:04:05Z07:00"))
 		}
 		return nil
-	case "login", "logout", "conflicts", "export", "tag":
-		return fmt.Errorf("%s is planned but not implemented yet", command)
+	case "push":
+		syncFlags := flag.NewFlagSet("sync push", flag.ContinueOnError)
+		syncFlags.SetOutput(os.Stderr)
+		dir := syncFlags.String("dir", "", "local sync directory")
+		if err := syncFlags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *dir == "" {
+			return fmt.Errorf("sync push requires -dir")
+		}
+		store, err := openStore(ctx, dbPath)
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		if err := cloudsync.Push(ctx, store, cloudsync.LocalDirClient{Dir: *dir}); err != nil {
+			return err
+		}
+		fmt.Printf("pushed sync artifacts to %s\n", *dir)
+		return nil
+	case "pull":
+		syncFlags := flag.NewFlagSet("sync pull", flag.ContinueOnError)
+		syncFlags.SetOutput(os.Stderr)
+		dir := syncFlags.String("dir", "", "local sync directory")
+		if err := syncFlags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *dir == "" {
+			return fmt.Errorf("sync pull requires -dir")
+		}
+		store, err := openStore(ctx, dbPath)
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		if err := cloudsync.Pull(ctx, store, cloudsync.LocalDirClient{Dir: *dir}); err != nil {
+			return err
+		}
+		fmt.Printf("pulled sync artifacts from %s\n", *dir)
+		return nil
+	case "restore":
+		syncFlags := flag.NewFlagSet("sync restore", flag.ContinueOnError)
+		syncFlags.SetOutput(os.Stderr)
+		dir := syncFlags.String("dir", "", "local sync directory")
+		if err := syncFlags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *dir == "" {
+			return fmt.Errorf("sync restore requires -dir")
+		}
+		secret, err := inputRecoverySecret()
+		if err != nil {
+			return err
+		}
+		client := cloudsync.LocalDirClient{Dir: *dir}
+		manifest, err := cloudsync.ReadManifest(ctx, client)
+		if err != nil {
+			return err
+		}
+		if err := storage.InitWithManifest(ctx, dbPath, secret, manifest); err != nil {
+			return err
+		}
+		store, err := storage.Open(ctx, dbPath, secret)
+		if err != nil {
+			return err
+		}
+		if err := cloudsync.Pull(ctx, store, client); err != nil {
+			store.Close()
+			return err
+		}
+		if err := store.Close(); err != nil {
+			return err
+		}
+		if !secretFromEnv() {
+			if err := unlock.Save(dbPath, secret); err != nil {
+				return err
+			}
+		}
+		fmt.Printf("restored sync artifacts from %s\n", *dir)
+		return nil
 	default:
-		return fmt.Errorf("unknown command: %s", command)
+		return fmt.Errorf("unknown sync subcommand: %s", args[0])
 	}
 }
 
@@ -284,6 +377,9 @@ implemented:
   show <task-id>
   search <query>
   sync status
+  sync push -dir <path>
+  sync pull -dir <path>
+  sync restore -dir <path>
 
 unlock:
   run unlock once per database, or set TASKS_REMOTE_SECRET for automation`)

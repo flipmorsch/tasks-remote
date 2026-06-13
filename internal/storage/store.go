@@ -54,6 +54,29 @@ type SyncStatus struct {
 	LastChangeAt   *time.Time
 }
 
+type Manifest struct {
+	Version int    `json:"version"`
+	Salt    string `json:"salt"`
+}
+
+type ExportedChange struct {
+	ChangeID         string `json:"change_id"`
+	DeviceID         string `json:"device_id"`
+	Sequence         int64  `json:"sequence"`
+	TaskID           string `json:"task_id"`
+	ChangeType       string `json:"change_type"`
+	EncryptedPayload string `json:"encrypted_payload"`
+	PayloadNonce     string `json:"payload_nonce"`
+	PayloadKeyID     string `json:"payload_key_id"`
+	CreatedAt        string `json:"created_at"`
+}
+
+type artifactEnvelope struct {
+	Version    int    `json:"version"`
+	Nonce      string `json:"nonce"`
+	Ciphertext string `json:"ciphertext"`
+}
+
 type changePayload struct {
 	Title  string `json:"title,omitempty"`
 	Body   string `json:"body,omitempty"`
@@ -95,6 +118,28 @@ func ReadSyncStatus(ctx context.Context, path string) (SyncStatus, error) {
 }
 
 func Init(ctx context.Context, path string, recoverySecret string) error {
+	salt, err := secure.RandomBytes(secure.SaltSize)
+	if err != nil {
+		return err
+	}
+	return InitWithSalt(ctx, path, recoverySecret, salt)
+}
+
+func InitWithManifest(ctx context.Context, path string, recoverySecret string, manifest Manifest) error {
+	if manifest.Version != 1 {
+		return fmt.Errorf("unsupported manifest version: %d", manifest.Version)
+	}
+	salt, err := base64.StdEncoding.DecodeString(manifest.Salt)
+	if err != nil {
+		return fmt.Errorf("decode manifest salt: %w", err)
+	}
+	return InitWithSalt(ctx, path, recoverySecret, salt)
+}
+
+func InitWithSalt(ctx context.Context, path string, recoverySecret string, salt []byte) error {
+	if len(salt) != secure.SaltSize {
+		return fmt.Errorf("salt must be %d bytes", secure.SaltSize)
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("create data directory: %w", err)
 	}
@@ -112,10 +157,6 @@ func Init(ctx context.Context, path string, recoverySecret string) error {
 	}
 	if count > 0 {
 		return nil
-	}
-	salt, err := secure.RandomBytes(secure.SaltSize)
-	if err != nil {
-		return err
 	}
 	if _, err := secure.DeriveKey(recoverySecret, salt, secure.DefaultKDFParams()); err != nil {
 		return err
@@ -157,6 +198,120 @@ func (s *Store) Close() error {
 		return nil
 	}
 	return s.db.Close()
+}
+
+func (s *Store) Manifest(ctx context.Context) (Manifest, error) {
+	salt, err := readSalt(ctx, s.db)
+	if err != nil {
+		return Manifest{}, err
+	}
+	return Manifest{
+		Version: 1,
+		Salt:    base64.StdEncoding.EncodeToString(salt),
+	}, nil
+}
+
+func (s *Store) ExportChanges(ctx context.Context) ([]ExportedChange, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		select change_id, device_id, sequence, task_id, change_type, encrypted_payload, payload_nonce, payload_key_id, created_at
+		from task_changes
+		order by device_id, sequence`)
+	if err != nil {
+		return nil, fmt.Errorf("export task changes: %w", err)
+	}
+	defer rows.Close()
+	var changes []ExportedChange
+	for rows.Next() {
+		var (
+			changeID, deviceID, taskID, changeType, payloadKeyID, createdAt string
+			sequence                                                        int64
+			encryptedPayload, payloadNonce                                  []byte
+		)
+		if err := rows.Scan(&changeID, &deviceID, &sequence, &taskID, &changeType, &encryptedPayload, &payloadNonce, &payloadKeyID, &createdAt); err != nil {
+			return nil, fmt.Errorf("scan exported change: %w", err)
+		}
+		changes = append(changes, ExportedChange{
+			ChangeID:         changeID,
+			DeviceID:         deviceID,
+			Sequence:         sequence,
+			TaskID:           taskID,
+			ChangeType:       changeType,
+			EncryptedPayload: base64.StdEncoding.EncodeToString(encryptedPayload),
+			PayloadNonce:     base64.StdEncoding.EncodeToString(payloadNonce),
+			PayloadKeyID:     payloadKeyID,
+			CreatedAt:        createdAt,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read exported changes: %w", err)
+	}
+	return changes, nil
+}
+
+func (s *Store) ImportChanges(ctx context.Context, changes []ExportedChange) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin import changes: %w", err)
+	}
+	defer tx.Rollback()
+	for _, change := range changes {
+		encryptedPayload, err := base64.StdEncoding.DecodeString(change.EncryptedPayload)
+		if err != nil {
+			return fmt.Errorf("decode change payload %s: %w", change.ChangeID, err)
+		}
+		payloadNonce, err := base64.StdEncoding.DecodeString(change.PayloadNonce)
+		if err != nil {
+			return fmt.Errorf("decode change nonce %s: %w", change.ChangeID, err)
+		}
+		_, err = tx.ExecContext(ctx, `
+			insert into task_changes(change_id, device_id, sequence, task_id, change_type, encrypted_payload, payload_nonce, payload_key_id, created_at, sync_state)
+			values(?, ?, ?, ?, ?, ?, ?, ?, ?, 'synced')
+			on conflict(change_id) do nothing`,
+			change.ChangeID, change.DeviceID, change.Sequence, change.TaskID, change.ChangeType, encryptedPayload, payloadNonce, change.PayloadKeyID, change.CreatedAt)
+		if err != nil {
+			return fmt.Errorf("insert imported change %s: %w", change.ChangeID, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit import changes: %w", err)
+	}
+	return s.RebuildProjection(ctx)
+}
+
+func (s *Store) SealArtifact(name string, plaintext []byte) ([]byte, error) {
+	nonce, ciphertext, err := secure.Seal(s.key, plaintext, []byte("artifact:"+name))
+	if err != nil {
+		return nil, err
+	}
+	envelope := artifactEnvelope{
+		Version:    1,
+		Nonce:      base64.StdEncoding.EncodeToString(nonce),
+		Ciphertext: base64.StdEncoding.EncodeToString(ciphertext),
+	}
+	data, err := json.MarshalIndent(envelope, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("encode artifact envelope: %w", err)
+	}
+	return data, nil
+}
+
+func (s *Store) OpenArtifact(name string, envelopeData []byte) ([]byte, error) {
+	var envelope artifactEnvelope
+	if err := json.Unmarshal(envelopeData, &envelope); err != nil {
+		return nil, fmt.Errorf("decode artifact envelope: %w", err)
+	}
+	if envelope.Version != 1 {
+		return nil, fmt.Errorf("unsupported artifact version: %d", envelope.Version)
+	}
+	nonce, err := base64.StdEncoding.DecodeString(envelope.Nonce)
+	if err != nil {
+		return nil, fmt.Errorf("decode artifact nonce: %w", err)
+	}
+	ciphertext, err := base64.StdEncoding.DecodeString(envelope.Ciphertext)
+	if err != nil {
+		return nil, fmt.Errorf("decode artifact ciphertext: %w", err)
+	}
+	return secure.Open(s.key, nonce, ciphertext, []byte("artifact:"+name))
 }
 
 func (s *Store) AddTask(ctx context.Context, title, body string) (Task, error) {

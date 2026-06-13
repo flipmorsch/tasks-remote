@@ -174,12 +174,19 @@ Implementation notes:
 Drive should contain a small set of application files in the app-specific Drive area:
 
 ```text
-manifest.json.enc
+manifest.json
+changes-v1.json.enc
 devices/<device-id>/changes-<range>.jsonl.enc
 snapshots/<snapshot-id>.bin.enc
 ```
 
 V1 can start without snapshots if replay stays fast enough. Add snapshots only when restore time approaches the RTO target.
+
+Current implementation note:
+
+- `manifest.json` is plaintext but must contain only non-sensitive collection metadata such as format version and KDF salt.
+- Task content and Task Changes are stored in encrypted authenticated artifacts.
+- `sync push -dir`, `sync pull -dir`, and `sync restore -dir` use a local directory as a fake Drive app-data folder until the Google Drive client is implemented.
 
 Each encrypted change file should contain newline-delimited canonical JSON records before encryption:
 
