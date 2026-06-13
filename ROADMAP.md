@@ -7,7 +7,7 @@ Deliver a usable offline task manager with encrypted local task payloads.
 Scope:
 
 - Initialize Go module and CLI structure.
-- Implement `tasks init`, `unlock`, `lock`, `add`, `list`, `show`, `edit`, `done`, `reopen`, `delete`, and `search`.
+- Implement `tasks-remote init`, `unlock`, `lock`, `add`, `list`, `show`, `edit`, `done`, `reopen`, `delete`, and `search`.
 - Create SQLite migrations.
 - Encrypt all Sensitive Task Data before SQLite writes.
 - Store unlock material through an OS keychain abstraction.
@@ -28,7 +28,7 @@ Current status:
 - Guarded plaintext JSON export is implemented.
 - OS keychain-backed `unlock` and `lock` are implemented.
 - `TASKS_REMOTE_SECRET` remains available for automation.
-- Reminder surfacing is implemented through `tasks reminders` with opt-in desktop notifications.
+- Reminder surfacing is implemented through `tasks-remote reminders` with opt-in desktop notifications.
 - Conflict detection and resolution are implemented (see Phase 4).
 
 ## Phase 2: Task Change Log and Replay
@@ -57,7 +57,7 @@ Add Google Drive sync without trusting Google Drive with plaintext task content.
 
 Scope:
 
-- Implement `tasks login google` and `logout google`.
+- Implement `tasks-remote login google` and `logout google`.
 - Use system browser OAuth for installed applications.
 - Store OAuth refresh tokens in the OS keychain.
 - Use the Drive app data folder with the narrow app data scope.
@@ -70,7 +70,7 @@ Acceptance:
 - Cloud artifacts do not contain plaintext Sensitive Task Data.
 - Tampered sync artifacts fail authentication.
 - Interrupted uploads are retryable.
-- `tasks sync status` works while locked without revealing task content.
+- `tasks-remote sync status` works while locked without revealing task content.
 
 Current status:
 
@@ -89,7 +89,7 @@ Scope:
 - Restore a new device from encrypted Drive artifacts.
 - Require Google authorization plus Recovery Secret for restore.
 - Merge independent field changes.
-- Expose `tasks conflicts` and `tasks conflicts resolve`.
+- Expose `tasks-remote conflicts` and `tasks-remote conflicts resolve`.
 - Preserve both sides of conflicting body edits.
 - Add visible Sync Health states.
 
@@ -106,7 +106,7 @@ Current status:
 - Restore from encrypted per-device artifacts works through `sync restore`.
 - Independent field edits (e.g. completion vs. content) auto-merge.
 - Concurrent content edits and delete/edit collisions become user-resolvable Sync Conflicts that preserve both sides.
-- `tasks conflicts resolve <conflict-id> --use local|remote` records a resolution that converges across devices.
+- `tasks-remote conflicts resolve <conflict-id> --use local|remote` records a resolution that converges across devices.
 - Visible Sync Health states beyond `sync status` counts are not built yet.
 
 ## Phase 5: Hardening and Release Readiness

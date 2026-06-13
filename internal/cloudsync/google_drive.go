@@ -124,14 +124,14 @@ func classifyDriveError(op string, err error) error {
 
 	var retrieveErr *oauth2.RetrieveError
 	if errors.As(err, &retrieveErr) {
-		return fmt.Errorf("%s: Google authorization is no longer valid; run `tasks login google` to reauthorize: %w", op, err)
+		return fmt.Errorf("%s: Google authorization is no longer valid; run `tasks-remote login google` to reauthorize: %w", op, err)
 	}
 
 	var apiErr *googleapi.Error
 	if errors.As(err, &apiErr) {
 		switch {
 		case apiErr.Code == 401:
-			return fmt.Errorf("%s: Google authorization expired or was revoked; run `tasks login google` to reauthorize: %w", op, err)
+			return fmt.Errorf("%s: Google authorization expired or was revoked; run `tasks-remote login google` to reauthorize: %w", op, err)
 		case apiErr.Code == 429 || driveRateLimited(apiErr):
 			return fmt.Errorf("%s: Google Drive rate limit or storage quota reached; wait and retry: %w", op, err)
 		case apiErr.Code == 403:

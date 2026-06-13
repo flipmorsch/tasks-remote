@@ -39,31 +39,31 @@ Task Search is local-only and available only on an Unlocked Device.
 
 ## CLI Commands
 
-Use `tasks` as the placeholder binary name until the project chooses a final name.
+The v1 binary is named `tasks-remote` (built from `cmd/tasks-remote`).
 
 Required v1 commands:
 
 ```text
-tasks init
-tasks unlock
-tasks lock
-tasks login google
-tasks logout google
-tasks add <title>
-tasks edit <task-id>
-tasks done <task-id>
-tasks reopen <task-id>
-tasks delete <task-id>
-tasks list
-tasks show <task-id>
-tasks search <query>
-tasks tag add <task-id> <tag>
-tasks tag remove <task-id> <tag>
-tasks sync
-tasks sync status
-tasks conflicts
-tasks conflicts resolve <conflict-id>
-tasks export
+tasks-remote init
+tasks-remote unlock
+tasks-remote lock
+tasks-remote login google
+tasks-remote logout google
+tasks-remote add <title>
+tasks-remote edit <task-id>
+tasks-remote done <task-id>
+tasks-remote reopen <task-id>
+tasks-remote delete <task-id>
+tasks-remote list
+tasks-remote show <task-id>
+tasks-remote search <query>
+tasks-remote tag add <task-id> <tag>
+tasks-remote tag remove <task-id> <tag>
+tasks-remote sync
+tasks-remote sync status
+tasks-remote conflicts
+tasks-remote conflicts resolve <conflict-id>
+tasks-remote export
 ```
 
 Command behavior:
@@ -71,19 +71,19 @@ Command behavior:
 - Local task mutations must write durable local state before attempting sync.
 - Commands that read or mutate Sensitive Task Data require an Unlocked Device.
 - Google login alone must not unlock task content.
-- `tasks sync status` must work when locked, but it must not print Sensitive Task Data.
-- `tasks export` must default to an explicit plaintext warning and require confirmation.
+- `tasks-remote sync status` must work when locked, but it must not print Sensitive Task Data.
+- `tasks-remote export` must default to an explicit plaintext warning and require confirmation.
 
 Current implementation note:
 
 - `TASKS_REMOTE_SECRET` is supported for non-interactive automation.
 - Interactive unlock caches recovery material in the OS keychain.
-- `tasks lock` clears the cached OS keychain entry for the selected database.
+- `tasks-remote lock` clears the cached OS keychain entry for the selected database.
 - Keychain entries are scoped by local database path.
 - Task tags are treated as Sensitive Task Data and stored inside encrypted task and change payloads.
 - Due dates and reminder dates are treated as Sensitive Task Data and stored inside encrypted task and change payloads.
-- `tasks export -out <path> --confirm-plaintext` writes active tasks to a new plaintext JSON file and refuses to overwrite an existing path.
-- `tasks reminders [-within <dur>] [-notify]` lists due and upcoming reminders on an Unlocked Device; `-notify` additionally sends best-effort desktop notifications.
+- `tasks-remote export -out <path> --confirm-plaintext` writes active tasks to a new plaintext JSON file and refuses to overwrite an existing path.
+- `tasks-remote reminders [-within <dur>] [-notify]` lists due and upcoming reminders on an Unlocked Device; `-notify` additionally sends best-effort desktop notifications.
 
 ## Storage Architecture
 
@@ -245,7 +245,7 @@ Current implementation note:
 - Each change records the per-task change it was authored against (`parent_change_id`). Two changes that share a parent are a fork: two devices edited the same version of a task offline.
 - Concurrent content edits become a `concurrent_edit` Sync Conflict and delete/edit collisions become a `delete_edit` Sync Conflict. Both sides are preserved in the change log.
 - Lower-stakes forks (completion status, tags) fall through to temporal last-writer-wins replay rather than blocking the user.
-- `tasks conflicts` lists open conflicts with both decrypted sides; `tasks conflicts resolve <conflict-id> --use local|remote` records the choice as a new `task.resolved` change that wins replay and converges to other devices when it syncs in.
+- `tasks-remote conflicts` lists open conflicts with both decrypted sides; `tasks-remote conflicts resolve <conflict-id> --use local|remote` records the choice as a new `task.resolved` change that wins replay and converges to other devices when it syncs in.
 - Known v1 limitation: detection compares the changes at the fork point. If a device makes several edits to a task before its first sync with a divergent device, resolution applies the fork-point version of the chosen side rather than that side's latest edit.
 
 ## Crypto Requirements
@@ -354,10 +354,10 @@ Manual acceptance:
 
 ## Open Decisions
 
-- Final binary name.
-- Exact supported keychain platform matrix.
 - Whether a later whole-database encrypted SQLite spike should target SQLCipher or another maintained option.
 
 ## Resolved Decisions
 
-- Reminder delivery: v1 surfaces reminders through `tasks reminders`, which lists due and upcoming reminders on an Unlocked Device. An opt-in `-notify` flag fires best-effort OS notifications (title only). There is no long-running daemon; the command is scheduled by the OS (cron/systemd/launchd) at the user's preferred cadence.
+- Final binary name: `tasks-remote`, built from `cmd/tasks-remote`.
+- Reminder delivery: v1 surfaces reminders through `tasks-remote reminders`, which lists due and upcoming reminders on an Unlocked Device. An opt-in `-notify` flag fires best-effort OS notifications (title only). There is no long-running daemon; the command is scheduled by the OS (cron/systemd/launchd) at the user's preferred cadence.
+- Keychain platform matrix: the OS keychain integration (via `github.com/zalando/go-keyring`) supports macOS Keychain, Windows Credential Manager, and Linux Secret Service (e.g. GNOME Keyring / KWallet over D-Bus). On headless Linux without a Secret Service provider, use `TASKS_REMOTE_SECRET` instead of cached unlock. See `docs/RELEASE-NOTES.md`.

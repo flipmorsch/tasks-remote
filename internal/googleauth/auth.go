@@ -78,7 +78,7 @@ func LoadToken() (*oauth2.Token, error) {
 	data, err := keyring.Get(serviceName, tokenAccount)
 	if err != nil {
 		if err == keyring.ErrNotFound {
-			return nil, fmt.Errorf("google account is not logged in: run `tasks login google -credentials <file>`")
+			return nil, fmt.Errorf("google account is not logged in: run `tasks-remote login google -credentials <file>`")
 		}
 		return nil, fmt.Errorf("read google token from OS keychain: %w", err)
 	}

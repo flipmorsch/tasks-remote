@@ -11,7 +11,7 @@ import (
 
 // Send shows a desktop notification with the given title and message. Only the
 // task title is passed through here, never body text, so reminder delivery
-// reveals no more than `tasks list` already shows on an unlocked device.
+// reveals no more than `tasks-remote list` already shows on an unlocked device.
 func Send(title, message string) error {
 	switch runtime.GOOS {
 	case "linux":

@@ -24,7 +24,7 @@ func Load(dbPath string) (string, error) {
 	secret, err := keyring.Get(ServiceName, account(dbPath))
 	if err != nil {
 		if errors.Is(err, keyring.ErrNotFound) {
-			return "", fmt.Errorf("device is locked: run `tasks -db %q unlock` or set %s", dbPath, EnvSecret)
+			return "", fmt.Errorf("device is locked: run `tasks-remote -db %q unlock` or set %s", dbPath, EnvSecret)
 		}
 		return "", fmt.Errorf("read OS keychain: %w", err)
 	}

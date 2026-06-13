@@ -434,9 +434,9 @@ func runConflicts(ctx context.Context, dbPath string, args []string) error {
 		fmt.Printf("  local:  %s\n", formatConflictSide(conflict.Local))
 		fmt.Printf("  remote: %s\n", formatConflictSide(conflict.Remote))
 		if conflict.Type == "duplicate_device_sequence" {
-			fmt.Printf("  resolve: tasks conflicts resolve %s\n", conflict.ID)
+			fmt.Printf("  resolve: tasks-remote conflicts resolve %s\n", conflict.ID)
 		} else {
-			fmt.Printf("  resolve: tasks conflicts resolve %s --use local|remote\n", conflict.ID)
+			fmt.Printf("  resolve: tasks-remote conflicts resolve %s --use local|remote\n", conflict.ID)
 		}
 	}
 	return nil
@@ -751,7 +751,7 @@ func defaultDBPath() string {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, `usage: tasks [-db path] <command>
+	fmt.Fprintln(os.Stderr, `usage: tasks-remote [-db path] <command>
 
 implemented:
   init
