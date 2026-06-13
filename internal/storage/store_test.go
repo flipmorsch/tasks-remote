@@ -93,8 +93,12 @@ func TestSearchScansAfterDecrypt(t *testing.T) {
 	if _, err := store.AddTask(ctx, "Pay invoice", "Private vendor name"); err != nil {
 		t.Fatalf("add matching task: %v", err)
 	}
-	if _, err := store.AddTask(ctx, "Buy coffee", "Errand"); err != nil {
+	tagged, err := store.AddTask(ctx, "Buy coffee", "Errand")
+	if err != nil {
 		t.Fatalf("add nonmatching task: %v", err)
+	}
+	if _, err := store.AddTag(ctx, tagged.ID, "errands"); err != nil {
+		t.Fatalf("add tag: %v", err)
 	}
 	matches, err := store.SearchTasks(ctx, "vendor")
 	if err != nil {
@@ -102,6 +106,13 @@ func TestSearchScansAfterDecrypt(t *testing.T) {
 	}
 	if len(matches) != 1 || matches[0].Title != "Pay invoice" {
 		t.Fatalf("unexpected matches: %#v", matches)
+	}
+	tagMatches, err := store.SearchTasks(ctx, "errand")
+	if err != nil {
+		t.Fatalf("search tag: %v", err)
+	}
+	if len(tagMatches) != 1 || tagMatches[0].Title != "Buy coffee" {
+		t.Fatalf("unexpected tag matches: %#v", tagMatches)
 	}
 }
 
@@ -126,6 +137,9 @@ func TestMutationsAppendEncryptedTaskChanges(t *testing.T) {
 	if _, err := store.EditTask(ctx, task.ID, sensitiveTitle, sensitiveBody); err != nil {
 		t.Fatalf("edit: %v", err)
 	}
+	if _, err := store.AddTag(ctx, task.ID, "salary-secret"); err != nil {
+		t.Fatalf("add tag: %v", err)
+	}
 	if _, err := store.SetTaskStatus(ctx, task.ID, "done"); err != nil {
 		t.Fatalf("done: %v", err)
 	}
@@ -137,15 +151,15 @@ func TestMutationsAppendEncryptedTaskChanges(t *testing.T) {
 	if err := store.db.QueryRowContext(ctx, `select count(*) from task_changes where task_id = ?`, task.ID).Scan(&count); err != nil {
 		t.Fatalf("count changes: %v", err)
 	}
-	if count != 4 {
-		t.Fatalf("expected 4 changes, got %d", count)
+	if count != 5 {
+		t.Fatalf("expected 5 changes, got %d", count)
 	}
 	rows, err := store.db.QueryContext(ctx, `select sequence, change_type from task_changes order by sequence`)
 	if err != nil {
 		t.Fatalf("query changes: %v", err)
 	}
 	defer rows.Close()
-	wantTypes := []string{"task.created", "task.updated", "task.status_changed", "task.deleted"}
+	wantTypes := []string{"task.created", "task.updated", "task.tags_changed", "task.status_changed", "task.deleted"}
 	var gotTypes []string
 	for rows.Next() {
 		var sequence int
@@ -191,6 +205,9 @@ func TestMutationsAppendEncryptedTaskChanges(t *testing.T) {
 		if bytes.Contains(data, []byte(sensitiveBody)) {
 			t.Fatalf("plaintext changed body found in %s", path)
 		}
+		if bytes.Contains(data, []byte("salary-secret")) {
+			t.Fatalf("plaintext tag found in %s", path)
+		}
 	}
 }
 
@@ -215,6 +232,9 @@ func TestRebuildProjectionFromTaskChanges(t *testing.T) {
 	if _, err := store.EditTask(ctx, task.ID, "Replayed private task", "Replayed private body"); err != nil {
 		t.Fatalf("edit: %v", err)
 	}
+	if _, err := store.AddTag(ctx, task.ID, "replayed-tag"); err != nil {
+		t.Fatalf("add tag: %v", err)
+	}
 	if _, err := store.SetTaskStatus(ctx, task.ID, "done"); err != nil {
 		t.Fatalf("done: %v", err)
 	}
@@ -238,6 +258,57 @@ func TestRebuildProjectionFromTaskChanges(t *testing.T) {
 	}
 	if replayed.Title != "Replayed private task" || replayed.Body != "Replayed private body" || replayed.Status != "done" {
 		t.Fatalf("unexpected replayed task: %#v", replayed)
+	}
+	if len(replayed.Tags) != 1 || replayed.Tags[0] != "replayed-tag" {
+		t.Fatalf("unexpected replayed tags: %#v", replayed)
+	}
+}
+
+func TestTagMutationsAreEncryptedAtRest(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "tasks.db")
+	secret := "tag secret"
+	tag := "private-medical"
+
+	if err := Init(ctx, dbPath, secret); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	store, err := Open(ctx, dbPath, secret)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	task, err := store.AddTask(ctx, "Doctor note", "")
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	tagged, err := store.AddTag(ctx, task.ID, tag)
+	if err != nil {
+		t.Fatalf("add tag: %v", err)
+	}
+	if len(tagged.Tags) != 1 || tagged.Tags[0] != tag {
+		t.Fatalf("unexpected tags: %#v", tagged)
+	}
+	untagged, err := store.RemoveTag(ctx, task.ID, tag)
+	if err != nil {
+		t.Fatalf("remove tag: %v", err)
+	}
+	if len(untagged.Tags) != 0 {
+		t.Fatalf("unexpected tags after remove: %#v", untagged)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	for _, path := range []string{dbPath, dbPath + "-wal", dbPath + "-shm"} {
+		data, err := os.ReadFile(path)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		if bytes.Contains(data, []byte(tag)) {
+			t.Fatalf("plaintext tag found in %s", path)
+		}
 	}
 }
 

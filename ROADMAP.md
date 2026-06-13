@@ -23,9 +23,10 @@ Acceptance:
 Current status:
 
 - Basic offline task commands are implemented.
+- Encrypted task tags are implemented.
 - OS keychain-backed `unlock` and `lock` are implemented.
 - `TASKS_REMOTE_SECRET` remains available for automation.
-- Tags, reminders, Google Drive sync, and conflict resolution are not implemented yet.
+- Reminders and conflict resolution are not implemented yet.
 
 ## Phase 2: Task Change Log and Replay
 

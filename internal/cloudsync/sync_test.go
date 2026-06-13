@@ -31,12 +31,19 @@ func TestPushAndPullEncryptedChanges(t *testing.T) {
 	if _, err := source.AddTask(ctx, title, body); err != nil {
 		t.Fatalf("add source task: %v", err)
 	}
+	sourceTasks, err := source.ListTasks(ctx)
+	if err != nil {
+		t.Fatalf("list source tasks: %v", err)
+	}
+	if _, err := source.AddTag(ctx, sourceTasks[0].ID, "drive-private"); err != nil {
+		t.Fatalf("add source tag: %v", err)
+	}
 	statusBefore, err := storage.ReadSyncStatus(ctx, sourceDB)
 	if err != nil {
 		t.Fatalf("read status before push: %v", err)
 	}
-	if statusBefore.PendingChanges != 1 {
-		t.Fatalf("pending before push = %d, want 1", statusBefore.PendingChanges)
+	if statusBefore.PendingChanges != 2 {
+		t.Fatalf("pending before push = %d, want 2", statusBefore.PendingChanges)
 	}
 	if err := Push(ctx, source, LocalDirClient{Dir: syncDir}); err != nil {
 		t.Fatalf("push: %v", err)
@@ -57,7 +64,7 @@ func TestPushAndPullEncryptedChanges(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read artifact %s: %v", name, err)
 		}
-		if bytes.Contains(data, []byte(title)) || bytes.Contains(data, []byte(body)) {
+		if bytes.Contains(data, []byte(title)) || bytes.Contains(data, []byte(body)) || bytes.Contains(data, []byte("drive-private")) {
 			t.Fatalf("plaintext task content found in %s", name)
 		}
 	}
@@ -84,6 +91,9 @@ func TestPushAndPullEncryptedChanges(t *testing.T) {
 	}
 	if len(tasks) != 1 || tasks[0].Title != title || tasks[0].Body != body {
 		t.Fatalf("unexpected restored tasks: %#v", tasks)
+	}
+	if len(tasks[0].Tags) != 1 || tasks[0].Tags[0] != "drive-private" {
+		t.Fatalf("unexpected restored tags: %#v", tasks[0])
 	}
 }
 

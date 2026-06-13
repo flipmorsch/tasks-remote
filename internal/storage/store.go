@@ -28,14 +28,16 @@ type Task struct {
 	ID        string
 	Title     string
 	Body      string
+	Tags      []string
 	Status    string
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }
 
 type taskPayload struct {
-	Title string `json:"title"`
-	Body  string `json:"body,omitempty"`
+	Title string   `json:"title"`
+	Body  string   `json:"body,omitempty"`
+	Tags  []string `json:"tags,omitempty"`
 }
 
 type Change struct {
@@ -89,9 +91,10 @@ type artifactEnvelope struct {
 }
 
 type changePayload struct {
-	Title  string `json:"title,omitempty"`
-	Body   string `json:"body,omitempty"`
-	Status string `json:"status,omitempty"`
+	Title  string   `json:"title,omitempty"`
+	Body   string   `json:"body,omitempty"`
+	Tags   []string `json:"tags,omitempty"`
+	Status string   `json:"status,omitempty"`
 }
 
 func ReadSyncStatus(ctx context.Context, path string) (SyncStatus, error) {
@@ -411,11 +414,12 @@ func (s *Store) AddTask(ctx context.Context, title, body string) (Task, error) {
 		ID:        newID("task"),
 		Title:     title,
 		Body:      body,
+		Tags:      []string{},
 		Status:    "open",
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
-	nonce, ciphertext, err := encryptTask(s.key, task.ID, taskPayload{Title: title, Body: body})
+	nonce, ciphertext, err := encryptTask(s.key, task.ID, taskPayload{Title: title, Body: body, Tags: task.Tags})
 	if err != nil {
 		return Task{}, err
 	}
@@ -434,6 +438,7 @@ func (s *Store) AddTask(ctx context.Context, title, body string) (Task, error) {
 	if _, err := s.appendChange(ctx, tx, task.ID, "task.created", changePayload{
 		Title:  title,
 		Body:   body,
+		Tags:   task.Tags,
 		Status: task.Status,
 	}, now); err != nil {
 		return Task{}, err
@@ -457,7 +462,7 @@ func (s *Store) EditTask(ctx context.Context, id, title, body string) (Task, err
 	current.Title = title
 	current.Body = body
 	current.UpdatedAt = now
-	nonce, ciphertext, err := encryptTask(s.key, current.ID, taskPayload{Title: title, Body: body})
+	nonce, ciphertext, err := encryptTask(s.key, current.ID, taskPayload{Title: title, Body: body, Tags: current.Tags})
 	if err != nil {
 		return Task{}, err
 	}
@@ -477,13 +482,82 @@ func (s *Store) EditTask(ctx context.Context, id, title, body string) (Task, err
 	if err := requireAffected(res, id); err != nil {
 		return Task{}, err
 	}
-	if _, err := s.appendChange(ctx, tx, id, "task.updated", changePayload{Title: title, Body: body}, now); err != nil {
+	if _, err := s.appendChange(ctx, tx, id, "task.updated", changePayload{Title: title, Body: body, Tags: current.Tags}, now); err != nil {
 		return Task{}, err
 	}
 	if err := tx.Commit(); err != nil {
 		return Task{}, fmt.Errorf("commit edit task: %w", err)
 	}
 	return current, nil
+}
+
+func (s *Store) AddTag(ctx context.Context, id, tag string) (Task, error) {
+	tag = normalizeTag(tag)
+	if tag == "" {
+		return Task{}, errors.New("tag is required")
+	}
+	current, err := s.GetTask(ctx, id)
+	if err != nil {
+		return Task{}, err
+	}
+	for _, existing := range current.Tags {
+		if existing == tag {
+			return current, nil
+		}
+	}
+	current.Tags = append(current.Tags, tag)
+	return s.updateTaskTags(ctx, current)
+}
+
+func (s *Store) RemoveTag(ctx context.Context, id, tag string) (Task, error) {
+	tag = normalizeTag(tag)
+	if tag == "" {
+		return Task{}, errors.New("tag is required")
+	}
+	current, err := s.GetTask(ctx, id)
+	if err != nil {
+		return Task{}, err
+	}
+	next := current.Tags[:0]
+	for _, existing := range current.Tags {
+		if existing != tag {
+			next = append(next, existing)
+		}
+	}
+	current.Tags = next
+	return s.updateTaskTags(ctx, current)
+}
+
+func (s *Store) updateTaskTags(ctx context.Context, task Task) (Task, error) {
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	task.UpdatedAt = now
+	nonce, ciphertext, err := encryptTask(s.key, task.ID, taskPayload{Title: task.Title, Body: task.Body, Tags: task.Tags})
+	if err != nil {
+		return Task{}, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Task{}, fmt.Errorf("begin tag update: %w", err)
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `
+		update tasks
+		set encrypted_payload = ?, payload_nonce = ?, payload_key_id = ?, updated_at = ?
+		where task_id = ? and deleted_at is null`,
+		ciphertext, nonce, payloadKeyID, now.Format(time.RFC3339Nano), task.ID)
+	if err != nil {
+		return Task{}, fmt.Errorf("update task tags: %w", err)
+	}
+	if err := requireAffected(res, task.ID); err != nil {
+		return Task{}, err
+	}
+	if _, err := s.appendChange(ctx, tx, task.ID, "task.tags_changed", changePayload{Tags: task.Tags}, now); err != nil {
+		return Task{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Task{}, fmt.Errorf("commit tag update: %w", err)
+	}
+	return task, nil
 }
 
 func (s *Store) SetTaskStatus(ctx context.Context, id, status string) (Task, error) {
@@ -674,7 +748,7 @@ func (s *Store) SearchTasks(ctx context.Context, query string) ([]Task, error) {
 	}
 	matches := tasks[:0]
 	for _, task := range tasks {
-		if strings.Contains(strings.ToLower(task.Title), query) || strings.Contains(strings.ToLower(task.Body), query) {
+		if strings.Contains(strings.ToLower(task.Title), query) || strings.Contains(strings.ToLower(task.Body), query) || tagsContain(task.Tags, query) {
 			matches = append(matches, task)
 		}
 	}
@@ -713,6 +787,7 @@ func (s *Store) scanTask(row scanner) (Task, error) {
 		ID:        taskID,
 		Title:     payload.Title,
 		Body:      payload.Body,
+		Tags:      append([]string(nil), payload.Tags...),
 		Status:    status,
 		CreatedAt: createdAt,
 		UpdatedAt: updatedAt,
@@ -908,7 +983,7 @@ func (s *Store) replayChange(ctx context.Context, tx *sql.Tx, taskID, changeType
 		if status == "" {
 			status = "open"
 		}
-		nonce, ciphertext, err := encryptTask(s.key, taskID, taskPayload{Title: payload.Title, Body: payload.Body})
+		nonce, ciphertext, err := encryptTask(s.key, taskID, taskPayload{Title: payload.Title, Body: payload.Body, Tags: payload.Tags})
 		if err != nil {
 			return err
 		}
@@ -928,6 +1003,7 @@ func (s *Store) replayChange(ctx context.Context, tx *sql.Tx, taskID, changeType
 		}
 		current.Title = payload.Title
 		current.Body = payload.Body
+		current.Tags = append([]string(nil), payload.Tags...)
 		nonce, ciphertext, err := encryptTask(s.key, taskID, current)
 		if err != nil {
 			return err
@@ -938,6 +1014,24 @@ func (s *Store) replayChange(ctx context.Context, tx *sql.Tx, taskID, changeType
 			ciphertext, nonce, payloadKeyID, at.Format(time.RFC3339Nano), taskID)
 		if err != nil {
 			return fmt.Errorf("replay update task: %w", err)
+		}
+		return nil
+	case "task.tags_changed":
+		current, err := s.taskPayloadInTx(ctx, tx, taskID)
+		if err != nil {
+			return err
+		}
+		current.Tags = append([]string(nil), payload.Tags...)
+		nonce, ciphertext, err := encryptTask(s.key, taskID, current)
+		if err != nil {
+			return err
+		}
+		_, err = tx.ExecContext(ctx, `
+			update tasks set encrypted_payload = ?, payload_nonce = ?, payload_key_id = ?, updated_at = ?
+			where task_id = ?`,
+			ciphertext, nonce, payloadKeyID, at.Format(time.RFC3339Nano), taskID)
+		if err != nil {
+			return fmt.Errorf("replay tag change: %w", err)
 		}
 		return nil
 	case "task.status_changed":
@@ -984,6 +1078,21 @@ func requireAffected(res sql.Result, id string) error {
 		return fmt.Errorf("task not found: %s", id)
 	}
 	return nil
+}
+
+func normalizeTag(tag string) string {
+	tag = strings.TrimSpace(strings.ToLower(tag))
+	tag = strings.TrimPrefix(tag, "#")
+	return tag
+}
+
+func tagsContain(tags []string, query string) bool {
+	for _, tag := range tags {
+		if strings.Contains(strings.ToLower(tag), query) {
+			return true
+		}
+	}
+	return false
 }
 
 func newID(prefix string) string {

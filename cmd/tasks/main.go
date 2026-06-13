@@ -112,7 +112,7 @@ func run(ctx context.Context, args []string) error {
 			return err
 		}
 		for _, task := range tasks {
-			fmt.Printf("%s [%s] %s\n", task.ID, task.Status, task.Title)
+			fmt.Printf("%s [%s] %s%s\n", task.ID, task.Status, task.Title, formatTags(task.Tags))
 		}
 		return nil
 	case "show":
@@ -129,6 +129,9 @@ func run(ctx context.Context, args []string) error {
 			return err
 		}
 		fmt.Printf("%s [%s]\n%s\n", task.ID, task.Status, task.Title)
+		if len(task.Tags) > 0 {
+			fmt.Printf("tags: %s\n", strings.Join(task.Tags, ", "))
+		}
 		if task.Body != "" {
 			fmt.Printf("\n%s\n", task.Body)
 		}
@@ -147,7 +150,7 @@ func run(ctx context.Context, args []string) error {
 			return err
 		}
 		for _, task := range tasks {
-			fmt.Printf("%s [%s] %s\n", task.ID, task.Status, task.Title)
+			fmt.Printf("%s [%s] %s%s\n", task.ID, task.Status, task.Title, formatTags(task.Tags))
 		}
 		return nil
 	case "edit":
@@ -219,14 +222,45 @@ func run(ctx context.Context, args []string) error {
 		return runSync(ctx, *dbPath, commandArgs)
 	case "conflicts":
 		return runConflicts(ctx, *dbPath, commandArgs)
+	case "tag":
+		return runTag(ctx, *dbPath, commandArgs)
 	case "login":
 		return runLogin(ctx, commandArgs)
 	case "logout":
 		return runLogout(commandArgs)
-	case "export", "tag":
+	case "export":
 		return fmt.Errorf("%s is planned but not implemented yet", command)
 	default:
 		return fmt.Errorf("unknown command: %s", command)
+	}
+}
+
+func runTag(ctx context.Context, dbPath string, args []string) error {
+	if len(args) != 3 {
+		return fmt.Errorf("tag requires: add <task-id> <tag> or remove <task-id> <tag>")
+	}
+	store, err := openStore(ctx, dbPath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	switch args[0] {
+	case "add":
+		task, err := store.AddTag(ctx, args[1], args[2])
+		if err != nil {
+			return err
+		}
+		fmt.Printf("%s %s%s\n", task.ID, task.Title, formatTags(task.Tags))
+		return nil
+	case "remove":
+		task, err := store.RemoveTag(ctx, args[1], args[2])
+		if err != nil {
+			return err
+		}
+		fmt.Printf("%s %s%s\n", task.ID, task.Title, formatTags(task.Tags))
+		return nil
+	default:
+		return fmt.Errorf("unknown tag subcommand: %s", args[0])
 	}
 }
 
@@ -451,6 +485,17 @@ func secretFromEnv() bool {
 	return os.Getenv(unlock.EnvSecret) != ""
 }
 
+func formatTags(tags []string) string {
+	if len(tags) == 0 {
+		return ""
+	}
+	formatted := make([]string, 0, len(tags))
+	for _, tag := range tags {
+		formatted = append(formatted, "#"+tag)
+	}
+	return " " + strings.Join(formatted, " ")
+}
+
 func defaultDBPath() string {
 	if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" {
 		return filepath.Join(xdg, "tasks-remote", "tasks.db")
@@ -474,6 +519,8 @@ implemented:
   done <task-id>
   reopen <task-id>
   delete <task-id>
+  tag add <task-id> <tag>
+  tag remove <task-id> <tag>
   list
   show <task-id>
   search <query>
