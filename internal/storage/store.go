@@ -248,6 +248,34 @@ func (s *Store) ExportChanges(ctx context.Context) ([]ExportedChange, error) {
 	return changes, nil
 }
 
+func (s *Store) MarkChangesSynced(ctx context.Context, changes []ExportedChange) error {
+	if len(changes) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin mark changes synced: %w", err)
+	}
+	defer tx.Rollback()
+	for _, change := range changes {
+		res, err := tx.ExecContext(ctx, `
+			update task_changes
+			set sync_state = 'synced'
+			where change_id = ?`,
+			change.ChangeID)
+		if err != nil {
+			return fmt.Errorf("mark change synced %s: %w", change.ChangeID, err)
+		}
+		if err := requireAffected(res, change.ChangeID); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit mark changes synced: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) ImportChanges(ctx context.Context, changes []ExportedChange) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

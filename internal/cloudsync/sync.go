@@ -99,7 +99,10 @@ func Push(ctx context.Context, store *storage.Store, client Client) error {
 	if err != nil {
 		return err
 	}
-	return client.Put(ctx, ChangesName, artifact)
+	if err := client.Put(ctx, ChangesName, artifact); err != nil {
+		return err
+	}
+	return store.MarkChangesSynced(ctx, changes)
 }
 
 func ReadManifest(ctx context.Context, client Client) (storage.Manifest, error) {

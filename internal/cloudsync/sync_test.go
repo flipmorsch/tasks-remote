@@ -3,6 +3,7 @@ package cloudsync
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -29,8 +30,22 @@ func TestPushAndPullEncryptedChanges(t *testing.T) {
 	if _, err := source.AddTask(ctx, title, body); err != nil {
 		t.Fatalf("add source task: %v", err)
 	}
+	statusBefore, err := storage.ReadSyncStatus(ctx, sourceDB)
+	if err != nil {
+		t.Fatalf("read status before push: %v", err)
+	}
+	if statusBefore.PendingChanges != 1 {
+		t.Fatalf("pending before push = %d, want 1", statusBefore.PendingChanges)
+	}
 	if err := Push(ctx, source, LocalDirClient{Dir: syncDir}); err != nil {
 		t.Fatalf("push: %v", err)
+	}
+	statusAfter, err := storage.ReadSyncStatus(ctx, sourceDB)
+	if err != nil {
+		t.Fatalf("read status after push: %v", err)
+	}
+	if statusAfter.PendingChanges != 0 {
+		t.Fatalf("pending after push = %d, want 0", statusAfter.PendingChanges)
 	}
 	if err := source.Close(); err != nil {
 		t.Fatalf("close source: %v", err)
@@ -120,4 +135,47 @@ func TestPullRejectsTamperedArtifact(t *testing.T) {
 	if err := Pull(ctx, target, client); err == nil {
 		t.Fatal("expected tampered artifact to fail")
 	}
+}
+
+func TestFailedPushLeavesChangesPending(t *testing.T) {
+	ctx := context.Background()
+	secret := "failed push secret"
+	dbPath := filepath.Join(t.TempDir(), "tasks.db")
+
+	if err := storage.Init(ctx, dbPath, secret); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	store, err := storage.Open(ctx, dbPath, secret)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer store.Close()
+	if _, err := store.AddTask(ctx, "Pending private task", "Pending private body"); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	if err := Push(ctx, store, failingClient{failName: ChangesName}); err == nil {
+		t.Fatal("expected push to fail")
+	}
+	status, err := storage.ReadSyncStatus(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if status.PendingChanges != 1 {
+		t.Fatalf("pending after failed push = %d, want 1", status.PendingChanges)
+	}
+}
+
+type failingClient struct {
+	failName string
+}
+
+func (c failingClient) Put(ctx context.Context, name string, data []byte) error {
+	if name == c.failName {
+		return fmt.Errorf("forced failure for %s", name)
+	}
+	return nil
+}
+
+func (c failingClient) Get(ctx context.Context, name string) ([]byte, error) {
+	return nil, fmt.Errorf("not implemented")
 }
