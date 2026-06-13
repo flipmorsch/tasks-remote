@@ -45,7 +45,13 @@ func run(ctx context.Context, args []string) error {
 		fmt.Printf("initialized %s\n", *dbPath)
 		return nil
 	case "add":
-		if len(commandArgs) == 0 {
+		addFlags := flag.NewFlagSet("add", flag.ContinueOnError)
+		addFlags.SetOutput(os.Stderr)
+		body := addFlags.String("body", "", "task body")
+		if err := addFlags.Parse(commandArgs); err != nil {
+			return err
+		}
+		if len(addFlags.Args()) == 0 {
 			return fmt.Errorf("add requires a title")
 		}
 		store, err := openStore(ctx, *dbPath)
@@ -53,7 +59,7 @@ func run(ctx context.Context, args []string) error {
 			return err
 		}
 		defer store.Close()
-		task, err := store.AddTask(ctx, strings.Join(commandArgs, " "), "")
+		task, err := store.AddTask(ctx, strings.Join(addFlags.Args(), " "), *body)
 		if err != nil {
 			return err
 		}
@@ -108,7 +114,89 @@ func run(ctx context.Context, args []string) error {
 			fmt.Printf("%s [%s] %s\n", task.ID, task.Status, task.Title)
 		}
 		return nil
-	case "lock", "unlock", "login", "logout", "sync", "conflicts", "export", "edit", "done", "reopen", "delete", "tag":
+	case "edit":
+		editFlags := flag.NewFlagSet("edit", flag.ContinueOnError)
+		editFlags.SetOutput(os.Stderr)
+		body := editFlags.String("body", "", "task body")
+		if err := editFlags.Parse(commandArgs); err != nil {
+			return err
+		}
+		if len(editFlags.Args()) < 2 {
+			return fmt.Errorf("edit requires a task id and title")
+		}
+		store, err := openStore(ctx, *dbPath)
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		task, err := store.EditTask(ctx, editFlags.Args()[0], strings.Join(editFlags.Args()[1:], " "), *body)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("%s %s\n", task.ID, task.Title)
+		return nil
+	case "done":
+		if len(commandArgs) != 1 {
+			return fmt.Errorf("done requires a task id")
+		}
+		store, err := openStore(ctx, *dbPath)
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		task, err := store.SetTaskStatus(ctx, commandArgs[0], "done")
+		if err != nil {
+			return err
+		}
+		fmt.Printf("%s [%s] %s\n", task.ID, task.Status, task.Title)
+		return nil
+	case "reopen":
+		if len(commandArgs) != 1 {
+			return fmt.Errorf("reopen requires a task id")
+		}
+		store, err := openStore(ctx, *dbPath)
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		task, err := store.SetTaskStatus(ctx, commandArgs[0], "open")
+		if err != nil {
+			return err
+		}
+		fmt.Printf("%s [%s] %s\n", task.ID, task.Status, task.Title)
+		return nil
+	case "delete":
+		if len(commandArgs) != 1 {
+			return fmt.Errorf("delete requires a task id")
+		}
+		store, err := openStore(ctx, *dbPath)
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		if err := store.DeleteTask(ctx, commandArgs[0]); err != nil {
+			return err
+		}
+		fmt.Printf("deleted %s\n", commandArgs[0])
+		return nil
+	case "sync":
+		if len(commandArgs) != 1 || commandArgs[0] != "status" {
+			return fmt.Errorf("only sync status is implemented")
+		}
+		status, err := storage.ReadSyncStatus(ctx, *dbPath)
+		if err != nil {
+			return err
+		}
+		if !status.Initialized {
+			fmt.Println("sync: not initialized")
+			return nil
+		}
+		fmt.Printf("sync: %d total changes, %d pending\n", status.TotalChanges, status.PendingChanges)
+		if status.LastChangeAt != nil {
+			fmt.Printf("last change: %s\n", status.LastChangeAt.Format("2006-01-02T15:04:05Z07:00"))
+		}
+		return nil
+	case "lock", "unlock", "login", "logout", "conflicts", "export", "tag":
 		return fmt.Errorf("%s is planned but not implemented yet", command)
 	default:
 		return fmt.Errorf("unknown command: %s", command)
@@ -147,10 +235,15 @@ func usage() {
 
 implemented:
   init
-  add <title>
+  add [-body text] <title>
+  edit [-body text] <task-id> <title>
+  done <task-id>
+  reopen <task-id>
+  delete <task-id>
   list
   show <task-id>
   search <query>
+  sync status
 
 temporary unlock:
   set TASKS_REMOTE_SECRET until keychain unlock is implemented`)

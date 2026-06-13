@@ -38,6 +38,62 @@ type taskPayload struct {
 	Body  string `json:"body,omitempty"`
 }
 
+type Change struct {
+	ID        string
+	DeviceID  string
+	Sequence  int64
+	TaskID    string
+	Type      string
+	CreatedAt time.Time
+}
+
+type SyncStatus struct {
+	Initialized    bool
+	TotalChanges   int
+	PendingChanges int
+	LastChangeAt   *time.Time
+}
+
+type changePayload struct {
+	Title  string `json:"title,omitempty"`
+	Body   string `json:"body,omitempty"`
+	Status string `json:"status,omitempty"`
+}
+
+func ReadSyncStatus(ctx context.Context, path string) (SyncStatus, error) {
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return SyncStatus{Initialized: false}, nil
+		}
+		return SyncStatus{}, fmt.Errorf("stat database: %w", err)
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return SyncStatus{}, fmt.Errorf("open sqlite: %w", err)
+	}
+	defer db.Close()
+	var status SyncStatus
+	status.Initialized = true
+	if err := db.QueryRowContext(ctx, `select count(*) from task_changes`).Scan(&status.TotalChanges); err != nil {
+		return SyncStatus{}, fmt.Errorf("count task changes: %w", err)
+	}
+	if err := db.QueryRowContext(ctx, `select count(*) from task_changes where sync_state = 'pending'`).Scan(&status.PendingChanges); err != nil {
+		return SyncStatus{}, fmt.Errorf("count pending task changes: %w", err)
+	}
+	var last sql.NullString
+	if err := db.QueryRowContext(ctx, `select max(created_at) from task_changes`).Scan(&last); err != nil {
+		return SyncStatus{}, fmt.Errorf("read last task change: %w", err)
+	}
+	if last.Valid {
+		parsed, err := time.Parse(time.RFC3339Nano, last.String)
+		if err != nil {
+			return SyncStatus{}, fmt.Errorf("parse last task change: %w", err)
+		}
+		status.LastChangeAt = &parsed
+	}
+	return status, nil
+}
+
 func Init(ctx context.Context, path string, recoverySecret string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("create data directory: %w", err)
@@ -64,7 +120,10 @@ func Init(ctx context.Context, path string, recoverySecret string) error {
 	if _, err := secure.DeriveKey(recoverySecret, salt, secure.DefaultKDFParams()); err != nil {
 		return err
 	}
-	_, err = db.ExecContext(ctx, `insert into app_meta(key, value) values('kdf_salt', ?)`, base64.StdEncoding.EncodeToString(salt))
+	deviceID := newID("device")
+	_, err = db.ExecContext(ctx, `
+		insert into app_meta(key, value) values('kdf_salt', ?), ('device_id', ?)`,
+		base64.StdEncoding.EncodeToString(salt), deviceID)
 	if err != nil {
 		return fmt.Errorf("store kdf metadata: %w", err)
 	}
@@ -118,14 +177,209 @@ func (s *Store) AddTask(ctx context.Context, title, body string) (Task, error) {
 	if err != nil {
 		return Task{}, err
 	}
-	_, err = s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Task{}, fmt.Errorf("begin add task: %w", err)
+	}
+	defer tx.Rollback()
+	_, err = tx.ExecContext(ctx, `
 		insert into tasks(task_id, encrypted_payload, payload_nonce, payload_key_id, status_metadata, created_at, updated_at)
 		values(?, ?, ?, ?, ?, ?, ?)`,
 		task.ID, ciphertext, nonce, payloadKeyID, task.Status, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
 	if err != nil {
 		return Task{}, fmt.Errorf("insert task: %w", err)
 	}
+	if _, err := s.appendChange(ctx, tx, task.ID, "task.created", changePayload{
+		Title:  title,
+		Body:   body,
+		Status: task.Status,
+	}, now); err != nil {
+		return Task{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Task{}, fmt.Errorf("commit add task: %w", err)
+	}
 	return task, nil
+}
+
+func (s *Store) EditTask(ctx context.Context, id, title, body string) (Task, error) {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return Task{}, errors.New("title is required")
+	}
+	current, err := s.GetTask(ctx, id)
+	if err != nil {
+		return Task{}, err
+	}
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	current.Title = title
+	current.Body = body
+	current.UpdatedAt = now
+	nonce, ciphertext, err := encryptTask(s.key, current.ID, taskPayload{Title: title, Body: body})
+	if err != nil {
+		return Task{}, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Task{}, fmt.Errorf("begin edit task: %w", err)
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `
+		update tasks
+		set encrypted_payload = ?, payload_nonce = ?, payload_key_id = ?, updated_at = ?
+		where task_id = ? and deleted_at is null`,
+		ciphertext, nonce, payloadKeyID, now.Format(time.RFC3339Nano), id)
+	if err != nil {
+		return Task{}, fmt.Errorf("update task: %w", err)
+	}
+	if err := requireAffected(res, id); err != nil {
+		return Task{}, err
+	}
+	if _, err := s.appendChange(ctx, tx, id, "task.updated", changePayload{Title: title, Body: body}, now); err != nil {
+		return Task{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Task{}, fmt.Errorf("commit edit task: %w", err)
+	}
+	return current, nil
+}
+
+func (s *Store) SetTaskStatus(ctx context.Context, id, status string) (Task, error) {
+	if status != "open" && status != "done" {
+		return Task{}, fmt.Errorf("invalid status: %s", status)
+	}
+	current, err := s.GetTask(ctx, id)
+	if err != nil {
+		return Task{}, err
+	}
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	current.Status = status
+	current.UpdatedAt = now
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Task{}, fmt.Errorf("begin status update: %w", err)
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `
+		update tasks
+		set status_metadata = ?, updated_at = ?
+		where task_id = ? and deleted_at is null`,
+		status, now.Format(time.RFC3339Nano), id)
+	if err != nil {
+		return Task{}, fmt.Errorf("update task status: %w", err)
+	}
+	if err := requireAffected(res, id); err != nil {
+		return Task{}, err
+	}
+	if _, err := s.appendChange(ctx, tx, id, "task.status_changed", changePayload{Status: status}, now); err != nil {
+		return Task{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Task{}, fmt.Errorf("commit status update: %w", err)
+	}
+	return current, nil
+}
+
+func (s *Store) DeleteTask(ctx context.Context, id string) error {
+	if _, err := s.GetTask(ctx, id); err != nil {
+		return err
+	}
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin delete task: %w", err)
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `
+		update tasks
+		set deleted_at = ?, updated_at = ?
+		where task_id = ? and deleted_at is null`,
+		now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), id)
+	if err != nil {
+		return fmt.Errorf("delete task: %w", err)
+	}
+	if err := requireAffected(res, id); err != nil {
+		return err
+	}
+	if _, err := s.appendChange(ctx, tx, id, "task.deleted", changePayload{}, now); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit delete task: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) RebuildProjection(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `
+		select change_id, task_id, change_type, encrypted_payload, payload_nonce, created_at
+		from task_changes
+		order by device_id, sequence`)
+	if err != nil {
+		return fmt.Errorf("read task changes: %w", err)
+	}
+	defer rows.Close()
+
+	type replayChange struct {
+		id         string
+		taskID     string
+		changeType string
+		payload    changePayload
+		createdAt  time.Time
+	}
+	var changes []replayChange
+	for rows.Next() {
+		var (
+			changeID   string
+			taskID     string
+			changeType string
+			ciphertext []byte
+			nonce      []byte
+			createdRaw string
+		)
+		if err := rows.Scan(&changeID, &taskID, &changeType, &ciphertext, &nonce, &createdRaw); err != nil {
+			return fmt.Errorf("scan task change: %w", err)
+		}
+		payload, err := decryptChange(s.key, changeID, nonce, ciphertext)
+		if err != nil {
+			return err
+		}
+		createdAt, err := time.Parse(time.RFC3339Nano, createdRaw)
+		if err != nil {
+			return fmt.Errorf("parse change created_at: %w", err)
+		}
+		changes = append(changes, replayChange{
+			id:         changeID,
+			taskID:     taskID,
+			changeType: changeType,
+			payload:    payload,
+			createdAt:  createdAt,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("read task changes: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close task changes: %w", err)
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin rebuild projection: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `delete from tasks`); err != nil {
+		return fmt.Errorf("clear projection: %w", err)
+	}
+	for _, change := range changes {
+		if err := s.replayChange(ctx, tx, change.taskID, change.changeType, change.payload, change.createdAt); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit rebuild projection: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) ListTasks(ctx context.Context) ([]Task, error) {
@@ -240,6 +494,19 @@ func migrate(ctx context.Context, db *sql.DB) error {
 			updated_at text not null,
 			deleted_at text
 		)`,
+		`create table if not exists task_changes (
+			change_id text primary key,
+			device_id text not null,
+			sequence integer not null,
+			task_id text not null,
+			change_type text not null,
+			encrypted_payload blob not null,
+			payload_nonce blob not null,
+			payload_key_id text not null,
+			created_at text not null,
+			sync_state text not null default 'pending',
+			unique(device_id, sequence)
+		)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := db.ExecContext(ctx, stmt); err != nil {
@@ -247,6 +514,56 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		}
 	}
 	return nil
+}
+
+func (s *Store) appendChange(ctx context.Context, tx *sql.Tx, taskID, changeType string, payload changePayload, now time.Time) (Change, error) {
+	deviceID, err := s.deviceID(ctx, tx)
+	if err != nil {
+		return Change{}, err
+	}
+	sequence, err := s.nextSequence(ctx, tx, deviceID)
+	if err != nil {
+		return Change{}, err
+	}
+	change := Change{
+		ID:        newID("change"),
+		DeviceID:  deviceID,
+		Sequence:  sequence,
+		TaskID:    taskID,
+		Type:      changeType,
+		CreatedAt: now,
+	}
+	nonce, ciphertext, err := encryptChange(s.key, change.ID, payload)
+	if err != nil {
+		return Change{}, err
+	}
+	_, err = tx.ExecContext(ctx, `
+		insert into task_changes(change_id, device_id, sequence, task_id, change_type, encrypted_payload, payload_nonce, payload_key_id, created_at, sync_state)
+		values(?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
+		change.ID, change.DeviceID, change.Sequence, change.TaskID, change.Type, ciphertext, nonce, payloadKeyID, now.Format(time.RFC3339Nano))
+	if err != nil {
+		return Change{}, fmt.Errorf("insert task change: %w", err)
+	}
+	return change, nil
+}
+
+func (s *Store) deviceID(ctx context.Context, tx *sql.Tx) (string, error) {
+	var deviceID string
+	if err := tx.QueryRowContext(ctx, `select value from app_meta where key = 'device_id'`).Scan(&deviceID); err != nil {
+		return "", fmt.Errorf("read device id: %w", err)
+	}
+	return deviceID, nil
+}
+
+func (s *Store) nextSequence(ctx context.Context, tx *sql.Tx, deviceID string) (int64, error) {
+	var sequence sql.NullInt64
+	if err := tx.QueryRowContext(ctx, `select max(sequence) from task_changes where device_id = ?`, deviceID).Scan(&sequence); err != nil {
+		return 0, fmt.Errorf("read next sequence: %w", err)
+	}
+	if !sequence.Valid {
+		return 1, nil
+	}
+	return sequence.Int64 + 1, nil
 }
 
 func readSalt(ctx context.Context, db *sql.DB) ([]byte, error) {
@@ -282,6 +599,111 @@ func decryptTask(key []byte, taskID string, nonce, ciphertext []byte) (taskPaylo
 		return taskPayload{}, fmt.Errorf("decode task payload: %w", err)
 	}
 	return payload, nil
+}
+
+func encryptChange(key []byte, changeID string, payload changePayload) ([]byte, []byte, error) {
+	plaintext, err := json.Marshal(payload)
+	if err != nil {
+		return nil, nil, fmt.Errorf("encode change payload: %w", err)
+	}
+	return secure.Seal(key, plaintext, []byte("change:"+changeID))
+}
+
+func decryptChange(key []byte, changeID string, nonce, ciphertext []byte) (changePayload, error) {
+	plaintext, err := secure.Open(key, nonce, ciphertext, []byte("change:"+changeID))
+	if err != nil {
+		return changePayload{}, err
+	}
+	var payload changePayload
+	if err := json.Unmarshal(plaintext, &payload); err != nil {
+		return changePayload{}, fmt.Errorf("decode change payload: %w", err)
+	}
+	return payload, nil
+}
+
+func (s *Store) replayChange(ctx context.Context, tx *sql.Tx, taskID, changeType string, payload changePayload, at time.Time) error {
+	switch changeType {
+	case "task.created":
+		status := payload.Status
+		if status == "" {
+			status = "open"
+		}
+		nonce, ciphertext, err := encryptTask(s.key, taskID, taskPayload{Title: payload.Title, Body: payload.Body})
+		if err != nil {
+			return err
+		}
+		_, err = tx.ExecContext(ctx, `
+			insert into tasks(task_id, encrypted_payload, payload_nonce, payload_key_id, status_metadata, created_at, updated_at)
+			values(?, ?, ?, ?, ?, ?, ?)
+			on conflict(task_id) do nothing`,
+			taskID, ciphertext, nonce, payloadKeyID, status, at.Format(time.RFC3339Nano), at.Format(time.RFC3339Nano))
+		if err != nil {
+			return fmt.Errorf("replay create task: %w", err)
+		}
+		return nil
+	case "task.updated":
+		current, err := s.taskPayloadInTx(ctx, tx, taskID)
+		if err != nil {
+			return err
+		}
+		current.Title = payload.Title
+		current.Body = payload.Body
+		nonce, ciphertext, err := encryptTask(s.key, taskID, current)
+		if err != nil {
+			return err
+		}
+		_, err = tx.ExecContext(ctx, `
+			update tasks set encrypted_payload = ?, payload_nonce = ?, payload_key_id = ?, updated_at = ?
+			where task_id = ?`,
+			ciphertext, nonce, payloadKeyID, at.Format(time.RFC3339Nano), taskID)
+		if err != nil {
+			return fmt.Errorf("replay update task: %w", err)
+		}
+		return nil
+	case "task.status_changed":
+		_, err := tx.ExecContext(ctx, `
+			update tasks set status_metadata = ?, updated_at = ?
+			where task_id = ?`,
+			payload.Status, at.Format(time.RFC3339Nano), taskID)
+		if err != nil {
+			return fmt.Errorf("replay status change: %w", err)
+		}
+		return nil
+	case "task.deleted":
+		_, err := tx.ExecContext(ctx, `
+			update tasks set deleted_at = ?, updated_at = ?
+			where task_id = ?`,
+			at.Format(time.RFC3339Nano), at.Format(time.RFC3339Nano), taskID)
+		if err != nil {
+			return fmt.Errorf("replay delete task: %w", err)
+		}
+		return nil
+	default:
+		return fmt.Errorf("unknown change type: %s", changeType)
+	}
+}
+
+func (s *Store) taskPayloadInTx(ctx context.Context, tx *sql.Tx, taskID string) (taskPayload, error) {
+	var ciphertext, nonce []byte
+	if err := tx.QueryRowContext(ctx, `
+		select encrypted_payload, payload_nonce from tasks where task_id = ?`, taskID).Scan(&ciphertext, &nonce); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return taskPayload{}, fmt.Errorf("task not found during replay: %s", taskID)
+		}
+		return taskPayload{}, fmt.Errorf("read task during replay: %w", err)
+	}
+	return decryptTask(s.key, taskID, nonce, ciphertext)
+}
+
+func requireAffected(res sql.Result, id string) error {
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("read affected rows: %w", err)
+	}
+	if rows == 0 {
+		return fmt.Errorf("task not found: %s", id)
+	}
+	return nil
 }
 
 func newID(prefix string) string {

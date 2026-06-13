@@ -104,3 +104,172 @@ func TestSearchScansAfterDecrypt(t *testing.T) {
 		t.Fatalf("unexpected matches: %#v", matches)
 	}
 }
+
+func TestMutationsAppendEncryptedTaskChanges(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "tasks.db")
+	secret := "change secret"
+	sensitiveTitle := "Private salary negotiation"
+	sensitiveBody := "Ask for 20 percent"
+
+	if err := Init(ctx, dbPath, secret); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	store, err := Open(ctx, dbPath, secret)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	task, err := store.AddTask(ctx, "Draft message", "")
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	if _, err := store.EditTask(ctx, task.ID, sensitiveTitle, sensitiveBody); err != nil {
+		t.Fatalf("edit: %v", err)
+	}
+	if _, err := store.SetTaskStatus(ctx, task.ID, "done"); err != nil {
+		t.Fatalf("done: %v", err)
+	}
+	if err := store.DeleteTask(ctx, task.ID); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+
+	var count int
+	if err := store.db.QueryRowContext(ctx, `select count(*) from task_changes where task_id = ?`, task.ID).Scan(&count); err != nil {
+		t.Fatalf("count changes: %v", err)
+	}
+	if count != 4 {
+		t.Fatalf("expected 4 changes, got %d", count)
+	}
+	rows, err := store.db.QueryContext(ctx, `select sequence, change_type from task_changes order by sequence`)
+	if err != nil {
+		t.Fatalf("query changes: %v", err)
+	}
+	defer rows.Close()
+	wantTypes := []string{"task.created", "task.updated", "task.status_changed", "task.deleted"}
+	var gotTypes []string
+	for rows.Next() {
+		var sequence int
+		var changeType string
+		if err := rows.Scan(&sequence, &changeType); err != nil {
+			t.Fatalf("scan change: %v", err)
+		}
+		if sequence != len(gotTypes)+1 {
+			t.Fatalf("sequence mismatch at %s: got %d", changeType, sequence)
+		}
+		gotTypes = append(gotTypes, changeType)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read changes: %v", err)
+	}
+	for i, want := range wantTypes {
+		if gotTypes[i] != want {
+			t.Fatalf("change %d type: got %s want %s", i, gotTypes[i], want)
+		}
+	}
+	tasks, err := store.ListTasks(ctx)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(tasks) != 0 {
+		t.Fatalf("deleted task should be hidden from projection: %#v", tasks)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	for _, path := range []string{dbPath, dbPath + "-wal", dbPath + "-shm"} {
+		data, err := os.ReadFile(path)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		if bytes.Contains(data, []byte(sensitiveTitle)) {
+			t.Fatalf("plaintext changed title found in %s", path)
+		}
+		if bytes.Contains(data, []byte(sensitiveBody)) {
+			t.Fatalf("plaintext changed body found in %s", path)
+		}
+	}
+}
+
+func TestRebuildProjectionFromTaskChanges(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "tasks.db")
+	secret := "replay secret"
+
+	if err := Init(ctx, dbPath, secret); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	store, err := Open(ctx, dbPath, secret)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer store.Close()
+
+	task, err := store.AddTask(ctx, "Original private task", "Original private body")
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	if _, err := store.EditTask(ctx, task.ID, "Replayed private task", "Replayed private body"); err != nil {
+		t.Fatalf("edit: %v", err)
+	}
+	if _, err := store.SetTaskStatus(ctx, task.ID, "done"); err != nil {
+		t.Fatalf("done: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, `delete from tasks`); err != nil {
+		t.Fatalf("damage projection: %v", err)
+	}
+	empty, err := store.ListTasks(ctx)
+	if err != nil {
+		t.Fatalf("list damaged projection: %v", err)
+	}
+	if len(empty) != 0 {
+		t.Fatalf("expected damaged projection to be empty: %#v", empty)
+	}
+
+	if err := store.RebuildProjection(ctx); err != nil {
+		t.Fatalf("rebuild: %v", err)
+	}
+	replayed, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("get replayed task: %v", err)
+	}
+	if replayed.Title != "Replayed private task" || replayed.Body != "Replayed private body" || replayed.Status != "done" {
+		t.Fatalf("unexpected replayed task: %#v", replayed)
+	}
+}
+
+func TestReadSyncStatusDoesNotNeedRecoverySecret(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "tasks.db")
+
+	if err := Init(ctx, dbPath, "status secret"); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	store, err := Open(ctx, dbPath, "status secret")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if _, err := store.AddTask(ctx, "Sensitive status task", "Sensitive status body"); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	status, err := ReadSyncStatus(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("sync status: %v", err)
+	}
+	if !status.Initialized {
+		t.Fatal("expected initialized status")
+	}
+	if status.TotalChanges != 1 || status.PendingChanges != 1 {
+		t.Fatalf("unexpected status: %#v", status)
+	}
+	if status.LastChangeAt == nil {
+		t.Fatal("expected last change timestamp")
+	}
+}
