@@ -248,6 +248,16 @@ func (s *Store) Manifest(ctx context.Context) (Manifest, error) {
 	}, nil
 }
 
+// LocalDeviceID returns this device's stable identifier, assigned at init and
+// used to namespace its append-safe change artifact during sync.
+func (s *Store) LocalDeviceID(ctx context.Context) (string, error) {
+	var deviceID string
+	if err := s.db.QueryRowContext(ctx, `select value from app_meta where key = 'device_id'`).Scan(&deviceID); err != nil {
+		return "", fmt.Errorf("read device id: %w", err)
+	}
+	return deviceID, nil
+}
+
 func (s *Store) ExportChanges(ctx context.Context) ([]ExportedChange, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		select change_id, device_id, sequence, task_id, change_type, encrypted_payload, payload_nonce, payload_key_id, created_at
@@ -257,6 +267,26 @@ func (s *Store) ExportChanges(ctx context.Context) ([]ExportedChange, error) {
 		return nil, fmt.Errorf("export task changes: %w", err)
 	}
 	defer rows.Close()
+	return scanExportedChanges(rows)
+}
+
+// ExportDeviceChanges returns only the changes that originated on the given
+// device. Each device pushes its own changes to its own cloud artifact, so a
+// push never has to rewrite another device's history.
+func (s *Store) ExportDeviceChanges(ctx context.Context, deviceID string) ([]ExportedChange, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		select change_id, device_id, sequence, task_id, change_type, encrypted_payload, payload_nonce, payload_key_id, created_at
+		from task_changes
+		where device_id = ?
+		order by sequence`, deviceID)
+	if err != nil {
+		return nil, fmt.Errorf("export device task changes: %w", err)
+	}
+	defer rows.Close()
+	return scanExportedChanges(rows)
+}
+
+func scanExportedChanges(rows *sql.Rows) ([]ExportedChange, error) {
 	var changes []ExportedChange
 	for rows.Next() {
 		var (

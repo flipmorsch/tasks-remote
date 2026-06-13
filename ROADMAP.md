@@ -75,6 +75,7 @@ Current status:
 
 - Local fake-Drive sync artifacts are implemented through `sync push -dir`, `sync pull -dir`, and `sync restore -dir`.
 - Protected change artifacts are encrypted and authenticated.
+- Sync uses per-device artifacts (`devices/<device-id>/changes-v1.json.enc`) so concurrent multi-device pushes cannot overwrite each other.
 - Google OAuth and the Drive app-data client are implemented behind `login google`, `logout google`, and `sync * -google -credentials <file>`.
 - Live Google verification still requires real OAuth desktop credentials and a Google account.
 

@@ -189,6 +189,8 @@ Current implementation note:
 
 - `manifest.json` is plaintext but must contain only non-sensitive collection metadata such as format version and KDF salt.
 - Task content and Task Changes are stored in encrypted authenticated artifacts.
+- Each device writes only its own changes to `devices/<device-id>/changes-v1.json.enc`, so concurrent pushes from different devices cannot overwrite each other. Pull merges every device artifact.
+- Each device artifact is bound to its own path through authenticated associated data, so a swapped or tampered file fails to open instead of corrupting the merge.
 - `sync push -dir`, `sync pull -dir`, and `sync restore -dir` use a local directory as a fake Drive app-data folder for deterministic tests.
 - `sync push -google -credentials <file>`, `sync pull -google -credentials <file>`, and `sync restore -google -credentials <file>` use Google Drive app data storage after `login google`.
 

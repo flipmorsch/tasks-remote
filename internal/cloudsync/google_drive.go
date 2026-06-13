@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 
 	drive "google.golang.org/api/drive/v3"
@@ -72,6 +73,40 @@ func (c GoogleDriveClient) Get(ctx context.Context, name string) ([]byte, error)
 		return nil, fmt.Errorf("read drive artifact %s: %w", name, err)
 	}
 	return data, nil
+}
+
+func (c GoogleDriveClient) List(ctx context.Context, prefix string) ([]string, error) {
+	if c.Service == nil {
+		return nil, fmt.Errorf("google drive service is required")
+	}
+	var names []string
+	pageToken := ""
+	for {
+		call := c.Service.Files.List().
+			Spaces("appDataFolder").
+			Q("trashed = false").
+			Fields("nextPageToken, files(name)").
+			PageSize(1000).
+			Context(ctx)
+		if pageToken != "" {
+			call = call.PageToken(pageToken)
+		}
+		res, err := call.Do()
+		if err != nil {
+			return nil, fmt.Errorf("list drive artifacts: %w", err)
+		}
+		for _, file := range res.Files {
+			if strings.HasPrefix(file.Name, prefix) {
+				names = append(names, file.Name)
+			}
+		}
+		if res.NextPageToken == "" {
+			break
+		}
+		pageToken = res.NextPageToken
+	}
+	sort.Strings(names)
+	return names, nil
 }
 
 func (c GoogleDriveClient) find(ctx context.Context, name string) (string, error) {

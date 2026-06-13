@@ -4,20 +4,38 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 
 	"tasks-remote/internal/storage"
 )
 
 const (
 	ManifestName = "manifest.json"
-	ChangesName  = "changes-v1.json.enc"
+	// DevicePrefix is the cloud namespace under which each device writes its
+	// own append-safe change artifact. A device only ever writes to its own
+	// path, so concurrent pushes from different devices cannot overwrite each
+	// other. See ADR 0002 and SPEC.md "Sync Format".
+	DevicePrefix = "devices/"
 )
+
+// DeviceChangesName is the artifact path a device writes its own changes to.
+// The path encodes the device id only for routing; security still comes from
+// the authenticated payload, never from the filename (SPEC.md).
+func DeviceChangesName(deviceID string) string {
+	return DevicePrefix + deviceID + "/changes-v1.json.enc"
+}
 
 type Client interface {
 	Put(ctx context.Context, name string, data []byte) error
 	Get(ctx context.Context, name string) ([]byte, error)
+	// List returns the names of all artifacts whose name begins with prefix,
+	// sorted lexicographically. A missing namespace returns an empty list,
+	// not an error.
+	List(ctx context.Context, prefix string) ([]string, error)
 }
 
 type LocalDirClient struct {
@@ -56,6 +74,44 @@ func (c LocalDirClient) Get(ctx context.Context, name string) ([]byte, error) {
 	return data, nil
 }
 
+func (c LocalDirClient) List(ctx context.Context, prefix string) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if c.Dir == "" {
+		return nil, fmt.Errorf("sync directory is required")
+	}
+	if _, err := os.Stat(c.Dir); err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("stat sync directory: %w", err)
+	}
+	var names []string
+	walkErr := filepath.WalkDir(c.Dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(c.Dir, path)
+		if err != nil {
+			return err
+		}
+		name := filepath.ToSlash(rel)
+		if strings.HasPrefix(name, prefix) {
+			names = append(names, name)
+		}
+		return nil
+	})
+	if walkErr != nil {
+		return nil, fmt.Errorf("list sync artifacts: %w", walkErr)
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
 func (c LocalDirClient) path(name string) (string, error) {
 	if c.Dir == "" {
 		return "", fmt.Errorf("sync directory is required")
@@ -68,13 +124,16 @@ func (c LocalDirClient) path(name string) (string, error) {
 }
 
 func validateArtifactName(name string) error {
-	clean := filepath.Clean(name)
-	if clean == "." || filepath.IsAbs(clean) || clean != name {
+	clean := filepath.ToSlash(filepath.Clean(name))
+	if clean == "." || filepath.IsAbs(clean) || clean != name || strings.HasPrefix(clean, "../") {
 		return fmt.Errorf("invalid sync artifact name: %s", name)
 	}
 	return nil
 }
 
+// Push uploads the manifest and this device's own change artifact. It only
+// writes the calling device's namespace, so two devices syncing at the same
+// time never clobber each other's uploaded changes.
 func Push(ctx context.Context, store *storage.Store, client Client) error {
 	manifest, err := store.Manifest(ctx)
 	if err != nil {
@@ -87,19 +146,24 @@ func Push(ctx context.Context, store *storage.Store, client Client) error {
 	if err := client.Put(ctx, ManifestName, manifestData); err != nil {
 		return err
 	}
-	changes, err := store.ExportChanges(ctx)
+	deviceID, err := store.LocalDeviceID(ctx)
 	if err != nil {
 		return err
 	}
+	changes, err := store.ExportDeviceChanges(ctx, deviceID)
+	if err != nil {
+		return err
+	}
+	name := DeviceChangesName(deviceID)
 	changesData, err := json.MarshalIndent(changes, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode sync changes: %w", err)
 	}
-	artifact, err := store.SealArtifact(ChangesName, changesData)
+	artifact, err := store.SealArtifact(name, changesData)
 	if err != nil {
 		return err
 	}
-	if err := client.Put(ctx, ChangesName, artifact); err != nil {
+	if err := client.Put(ctx, name, artifact); err != nil {
 		return err
 	}
 	return store.MarkChangesSynced(ctx, changes)
@@ -123,18 +187,31 @@ func ReadManifest(ctx context.Context, client Client) (storage.Manifest, error) 
 	return manifest, nil
 }
 
+// Pull downloads every device's change artifact, decrypts and authenticates
+// each one, and imports the merged set. Each artifact is bound to its own path
+// through authenticated associated data, so a swapped or tampered file fails
+// to open rather than silently corrupting the merge.
 func Pull(ctx context.Context, store *storage.Store, client Client) error {
-	artifact, err := client.Get(ctx, ChangesName)
+	names, err := client.List(ctx, DevicePrefix)
 	if err != nil {
 		return err
 	}
-	changesData, err := store.OpenArtifact(ChangesName, artifact)
-	if err != nil {
-		return err
+	sort.Strings(names)
+	var merged []storage.ExportedChange
+	for _, name := range names {
+		artifact, err := client.Get(ctx, name)
+		if err != nil {
+			return err
+		}
+		changesData, err := store.OpenArtifact(name, artifact)
+		if err != nil {
+			return fmt.Errorf("open device artifact %s: %w", name, err)
+		}
+		var changes []storage.ExportedChange
+		if err := json.Unmarshal(changesData, &changes); err != nil {
+			return fmt.Errorf("decode device artifact %s: %w", name, err)
+		}
+		merged = append(merged, changes...)
 	}
-	var changes []storage.ExportedChange
-	if err := json.Unmarshal(changesData, &changes); err != nil {
-		return fmt.Errorf("decode sync changes: %w", err)
-	}
-	return store.ImportChanges(ctx, changes)
+	return store.ImportChanges(ctx, merged)
 }
