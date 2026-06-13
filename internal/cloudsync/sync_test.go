@@ -3,6 +3,7 @@ package cloudsync
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -162,6 +163,63 @@ func TestFailedPushLeavesChangesPending(t *testing.T) {
 	}
 	if status.PendingChanges != 1 {
 		t.Fatalf("pending after failed push = %d, want 1", status.PendingChanges)
+	}
+}
+
+func TestPullDuplicateDeviceSequenceRecordsConflict(t *testing.T) {
+	ctx := context.Background()
+	secret := "pull conflict secret"
+	dbPath := filepath.Join(t.TempDir(), "tasks.db")
+	syncDir := t.TempDir()
+	client := LocalDirClient{Dir: syncDir}
+
+	if err := storage.Init(ctx, dbPath, secret); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	store, err := storage.Open(ctx, dbPath, secret)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer store.Close()
+	if _, err := store.AddTask(ctx, "Local task", "Local body"); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	changes, err := store.ExportChanges(ctx)
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	changes[0].ChangeID = "change_conflicting_pull"
+	data, err := json.MarshalIndent(changes, "", "  ")
+	if err != nil {
+		t.Fatalf("encode changes: %v", err)
+	}
+	artifact, err := store.SealArtifact(ChangesName, data)
+	if err != nil {
+		t.Fatalf("seal artifact: %v", err)
+	}
+	manifest, err := store.Manifest(ctx)
+	if err != nil {
+		t.Fatalf("manifest: %v", err)
+	}
+	manifestData, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		t.Fatalf("encode manifest: %v", err)
+	}
+	if err := client.Put(ctx, ManifestName, manifestData); err != nil {
+		t.Fatalf("put manifest: %v", err)
+	}
+	if err := client.Put(ctx, ChangesName, artifact); err != nil {
+		t.Fatalf("put changes: %v", err)
+	}
+	if err := Pull(ctx, store, client); err != nil {
+		t.Fatalf("pull: %v", err)
+	}
+	conflicts, err := store.ListConflicts(ctx)
+	if err != nil {
+		t.Fatalf("list conflicts: %v", err)
+	}
+	if len(conflicts) != 1 || conflicts[0].RemoteChangeID != "change_conflicting_pull" {
+		t.Fatalf("unexpected conflicts: %#v", conflicts)
 	}
 }
 

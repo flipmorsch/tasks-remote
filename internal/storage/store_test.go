@@ -269,7 +269,60 @@ func TestReadSyncStatusDoesNotNeedRecoverySecret(t *testing.T) {
 	if status.TotalChanges != 1 || status.PendingChanges != 1 {
 		t.Fatalf("unexpected status: %#v", status)
 	}
+	if status.OpenConflicts != 0 {
+		t.Fatalf("unexpected open conflicts: %#v", status)
+	}
 	if status.LastChangeAt == nil {
 		t.Fatal("expected last change timestamp")
+	}
+}
+
+func TestImportDuplicateDeviceSequenceCreatesSyncConflict(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "tasks.db")
+	secret := "sequence conflict secret"
+
+	if err := Init(ctx, dbPath, secret); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	store, err := Open(ctx, dbPath, secret)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer store.Close()
+	if _, err := store.AddTask(ctx, "Conflict source task", "Conflict source body"); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	changes, err := store.ExportChanges(ctx)
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	if len(changes) != 1 {
+		t.Fatalf("expected one exported change, got %d", len(changes))
+	}
+	conflicting := changes[0]
+	conflicting.ChangeID = "change_conflicting_remote"
+	if err := store.ImportChanges(ctx, []ExportedChange{conflicting}); err != nil {
+		t.Fatalf("import conflicting change: %v", err)
+	}
+	conflicts, err := store.ListConflicts(ctx)
+	if err != nil {
+		t.Fatalf("list conflicts: %v", err)
+	}
+	if len(conflicts) != 1 {
+		t.Fatalf("expected one sync conflict, got %#v", conflicts)
+	}
+	if conflicts[0].Type != "duplicate_device_sequence" {
+		t.Fatalf("unexpected conflict type: %#v", conflicts[0])
+	}
+	if conflicts[0].RemoteChangeID != "change_conflicting_remote" {
+		t.Fatalf("unexpected remote change id: %#v", conflicts[0])
+	}
+	status, err := ReadSyncStatus(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("sync status: %v", err)
+	}
+	if status.OpenConflicts != 1 {
+		t.Fatalf("open conflicts = %d, want 1", status.OpenConflicts)
 	}
 }

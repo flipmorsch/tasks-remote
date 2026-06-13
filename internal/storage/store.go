@@ -51,7 +51,18 @@ type SyncStatus struct {
 	Initialized    bool
 	TotalChanges   int
 	PendingChanges int
+	OpenConflicts  int
 	LastChangeAt   *time.Time
+}
+
+type SyncConflict struct {
+	ID             string
+	Type           string
+	DeviceID       string
+	Sequence       int64
+	LocalChangeID  string
+	RemoteChangeID string
+	CreatedAt      time.Time
 }
 
 type Manifest struct {
@@ -102,6 +113,9 @@ func ReadSyncStatus(ctx context.Context, path string) (SyncStatus, error) {
 	}
 	if err := db.QueryRowContext(ctx, `select count(*) from task_changes where sync_state = 'pending'`).Scan(&status.PendingChanges); err != nil {
 		return SyncStatus{}, fmt.Errorf("count pending task changes: %w", err)
+	}
+	if err := db.QueryRowContext(ctx, `select count(*) from sync_conflicts where resolved_at is null`).Scan(&status.OpenConflicts); err != nil {
+		return SyncStatus{}, fmt.Errorf("count sync conflicts: %w", err)
 	}
 	var last sql.NullString
 	if err := db.QueryRowContext(ctx, `select max(created_at) from task_changes`).Scan(&last); err != nil {
@@ -283,6 +297,13 @@ func (s *Store) ImportChanges(ctx context.Context, changes []ExportedChange) err
 	}
 	defer tx.Rollback()
 	for _, change := range changes {
+		conflicted, err := s.detectSequenceConflict(ctx, tx, change)
+		if err != nil {
+			return err
+		}
+		if conflicted {
+			continue
+		}
 		encryptedPayload, err := base64.StdEncoding.DecodeString(change.EncryptedPayload)
 		if err != nil {
 			return fmt.Errorf("decode change payload %s: %w", change.ChangeID, err)
@@ -304,6 +325,44 @@ func (s *Store) ImportChanges(ctx context.Context, changes []ExportedChange) err
 		return fmt.Errorf("commit import changes: %w", err)
 	}
 	return s.RebuildProjection(ctx)
+}
+
+func (s *Store) ListConflicts(ctx context.Context) ([]SyncConflict, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		select conflict_id, conflict_type, device_id, sequence, local_change_id, remote_change_id, created_at
+		from sync_conflicts
+		where resolved_at is null
+		order by created_at asc`)
+	if err != nil {
+		return nil, fmt.Errorf("list sync conflicts: %w", err)
+	}
+	defer rows.Close()
+	var conflicts []SyncConflict
+	for rows.Next() {
+		var conflict SyncConflict
+		var createdRaw string
+		if err := rows.Scan(
+			&conflict.ID,
+			&conflict.Type,
+			&conflict.DeviceID,
+			&conflict.Sequence,
+			&conflict.LocalChangeID,
+			&conflict.RemoteChangeID,
+			&createdRaw,
+		); err != nil {
+			return nil, fmt.Errorf("scan sync conflict: %w", err)
+		}
+		createdAt, err := time.Parse(time.RFC3339Nano, createdRaw)
+		if err != nil {
+			return nil, fmt.Errorf("parse sync conflict created_at: %w", err)
+		}
+		conflict.CreatedAt = createdAt
+		conflicts = append(conflicts, conflict)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read sync conflicts: %w", err)
+	}
+	return conflicts, nil
 }
 
 func (s *Store) SealArtifact(name string, plaintext []byte) ([]byte, error) {
@@ -690,6 +749,17 @@ func migrate(ctx context.Context, db *sql.DB) error {
 			sync_state text not null default 'pending',
 			unique(device_id, sequence)
 		)`,
+		`create table if not exists sync_conflicts (
+			conflict_id text primary key,
+			conflict_type text not null,
+			device_id text not null,
+			sequence integer not null,
+			local_change_id text not null,
+			remote_change_id text not null,
+			created_at text not null,
+			resolved_at text,
+			unique(conflict_type, device_id, sequence, local_change_id, remote_change_id)
+		)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := db.ExecContext(ctx, stmt); err != nil {
@@ -697,6 +767,33 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		}
 	}
 	return nil
+}
+
+func (s *Store) detectSequenceConflict(ctx context.Context, tx *sql.Tx, change ExportedChange) (bool, error) {
+	var localChangeID string
+	err := tx.QueryRowContext(ctx, `
+		select change_id from task_changes
+		where device_id = ? and sequence = ?`,
+		change.DeviceID, change.Sequence).Scan(&localChangeID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, fmt.Errorf("read sequence conflict candidate: %w", err)
+	}
+	if localChangeID == change.ChangeID {
+		return false, nil
+	}
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	_, err = tx.ExecContext(ctx, `
+		insert into sync_conflicts(conflict_id, conflict_type, device_id, sequence, local_change_id, remote_change_id, created_at)
+		values(?, 'duplicate_device_sequence', ?, ?, ?, ?, ?)
+		on conflict(conflict_type, device_id, sequence, local_change_id, remote_change_id) do nothing`,
+		newID("conflict"), change.DeviceID, change.Sequence, localChangeID, change.ChangeID, now.Format(time.RFC3339Nano))
+	if err != nil {
+		return false, fmt.Errorf("record sync conflict: %w", err)
+	}
+	return true, nil
 }
 
 func (s *Store) appendChange(ctx context.Context, tx *sql.Tx, taskID, changeType string, payload changePayload, now time.Time) (Change, error) {

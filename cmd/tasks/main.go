@@ -217,15 +217,43 @@ func run(ctx context.Context, args []string) error {
 		return nil
 	case "sync":
 		return runSync(ctx, *dbPath, commandArgs)
+	case "conflicts":
+		return runConflicts(ctx, *dbPath, commandArgs)
 	case "login":
 		return runLogin(ctx, commandArgs)
 	case "logout":
 		return runLogout(commandArgs)
-	case "conflicts", "export", "tag":
+	case "export", "tag":
 		return fmt.Errorf("%s is planned but not implemented yet", command)
 	default:
 		return fmt.Errorf("unknown command: %s", command)
 	}
+}
+
+func runConflicts(ctx context.Context, dbPath string, args []string) error {
+	if len(args) > 0 {
+		return fmt.Errorf("conflicts does not accept arguments yet")
+	}
+	store, err := openStore(ctx, dbPath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	conflicts, err := store.ListConflicts(ctx)
+	if err != nil {
+		return err
+	}
+	for _, conflict := range conflicts {
+		fmt.Printf("%s %s device=%s sequence=%d local=%s remote=%s\n",
+			conflict.ID,
+			conflict.Type,
+			conflict.DeviceID,
+			conflict.Sequence,
+			conflict.LocalChangeID,
+			conflict.RemoteChangeID,
+		)
+	}
+	return nil
 }
 
 func runLogin(ctx context.Context, args []string) error {
@@ -278,6 +306,9 @@ func runSync(ctx context.Context, dbPath string, args []string) error {
 			return nil
 		}
 		fmt.Printf("sync: %d total changes, %d pending\n", status.TotalChanges, status.PendingChanges)
+		if status.OpenConflicts > 0 {
+			fmt.Printf("conflicts: %d open\n", status.OpenConflicts)
+		}
 		if status.LastChangeAt != nil {
 			fmt.Printf("last change: %s\n", status.LastChangeAt.Format("2006-01-02T15:04:05Z07:00"))
 		}
@@ -446,6 +477,7 @@ implemented:
   list
   show <task-id>
   search <query>
+  conflicts
   sync status
   sync push -dir <path>
   sync pull -dir <path>
