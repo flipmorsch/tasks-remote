@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -427,6 +428,68 @@ func TestPlaintextExportIncludesActiveSensitiveData(t *testing.T) {
 	}
 	if got.DueAt == nil || !got.DueAt.Equal(due) {
 		t.Fatalf("unexpected exported due date: %#v", got.DueAt)
+	}
+}
+
+func TestErrorsDoNotLeakPlaintext(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "tasks.db")
+	title := "LEAK_TITLE_payroll_numbers"
+	body := "LEAK_BODY_account_98765"
+	tag := "LEAK_TAG_oncology"
+
+	if err := Init(ctx, dbPath, "right secret"); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	store, err := Open(ctx, dbPath, "right secret")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	task, err := store.AddTask(ctx, title, body)
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	if _, err := store.AddTag(ctx, task.ID, tag); err != nil {
+		t.Fatalf("tag: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	// Every error produced while reading with the wrong key (decrypt failures)
+	// or addressing a missing task must stay free of Sensitive Task Data.
+	wrong, err := Open(ctx, dbPath, "wrong secret")
+	if err != nil {
+		t.Fatalf("open wrong: %v", err)
+	}
+	defer wrong.Close()
+
+	var errs []error
+	if _, err := wrong.GetTask(ctx, task.ID); err != nil {
+		errs = append(errs, err)
+	}
+	if _, err := wrong.ListTasks(ctx); err != nil {
+		errs = append(errs, err)
+	}
+	if _, err := wrong.SearchTasks(ctx, "anything"); err != nil {
+		errs = append(errs, err)
+	}
+	if err := wrong.RebuildProjection(ctx); err != nil {
+		errs = append(errs, err)
+	}
+	if _, err := wrong.GetTask(ctx, "task_does_not_exist"); err != nil {
+		errs = append(errs, err)
+	}
+	if len(errs) == 0 {
+		t.Fatal("expected wrong-key reads to produce errors")
+	}
+	for _, err := range errs {
+		msg := err.Error()
+		for _, marker := range []string{title, body, tag} {
+			if strings.Contains(msg, marker) {
+				t.Fatalf("error leaked sensitive data %q: %s", marker, msg)
+			}
+		}
 	}
 }
 

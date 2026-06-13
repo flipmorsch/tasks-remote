@@ -4,14 +4,50 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 
+	"golang.org/x/oauth2"
 	drive "google.golang.org/api/drive/v3"
+	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
 )
+
+func TestClassifyDriveError(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"nil", nil, ""},
+		{"expired auth", &googleapi.Error{Code: 401}, "reauthorize"},
+		{"rate limited code", &googleapi.Error{Code: 429}, "rate limit"},
+		{"quota reason", &googleapi.Error{Code: 403, Errors: []googleapi.ErrorItem{{Reason: "storageQuotaExceeded"}}}, "rate limit or storage quota"},
+		{"forbidden scope", &googleapi.Error{Code: 403}, "denied access"},
+		{"server error", &googleapi.Error{Code: 503}, "temporarily unavailable"},
+		{"revoked grant", &oauth2.RetrieveError{ErrorCode: "invalid_grant"}, "no longer valid"},
+		{"network", &url.Error{Op: "Post", URL: "https://drive", Err: fmt.Errorf("dial tcp: connection refused")}, "could not reach"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := classifyDriveError("sync", tc.err)
+			if tc.want == "" {
+				if got != nil {
+					t.Fatalf("expected nil error, got %v", got)
+				}
+				return
+			}
+			if got == nil || !strings.Contains(got.Error(), tc.want) {
+				t.Fatalf("error %q does not mention %q", got, tc.want)
+			}
+		})
+	}
+}
 
 func TestGoogleDriveClientPutCreateUpdateAndGet(t *testing.T) {
 	ctx := context.Background()

@@ -271,6 +271,104 @@ func TestFailedPushLeavesChangesPending(t *testing.T) {
 	}
 }
 
+// TestInterruptedPushPreservesPriorArtifactAndPending simulates a crash after
+// the manifest upload but before the device artifact: the prior good artifact
+// must stay restorable, the new changes must stay pending (retryable), and a
+// retry must produce a complete artifact.
+func TestInterruptedPushPreservesPriorArtifactAndPending(t *testing.T) {
+	ctx := context.Background()
+	secret := "interrupt secret"
+	syncDir := t.TempDir()
+	client := LocalDirClient{Dir: syncDir}
+	dbPath := filepath.Join(t.TempDir(), "tasks.db")
+
+	if err := storage.Init(ctx, dbPath, secret); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	store, err := storage.Open(ctx, dbPath, secret)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer store.Close()
+	if _, err := store.AddTask(ctx, "First durable task", "First body"); err != nil {
+		t.Fatalf("add first: %v", err)
+	}
+	if err := Push(ctx, store, client); err != nil {
+		t.Fatalf("first push: %v", err)
+	}
+
+	// A second change whose push is interrupted at the device artifact write.
+	if _, err := store.AddTask(ctx, "Second task", "Second body"); err != nil {
+		t.Fatalf("add second: %v", err)
+	}
+	deviceID, err := store.LocalDeviceID(ctx)
+	if err != nil {
+		t.Fatalf("device id: %v", err)
+	}
+	interrupting := interruptingClient{Client: client, failName: DeviceChangesName(deviceID)}
+	if err := Push(ctx, store, interrupting); err == nil {
+		t.Fatal("expected interrupted push to fail")
+	}
+
+	// Changes stay pending so the push is retryable.
+	status, err := storage.ReadSyncStatus(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if status.PendingChanges == 0 {
+		t.Fatal("interrupted push must leave changes pending")
+	}
+
+	// No partial/temp artifact leaked into the device namespace.
+	names, err := client.List(ctx, DevicePrefix)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(names) != 1 {
+		t.Fatalf("interrupted push must not add a device artifact, got %v", names)
+	}
+
+	// The prior good artifact still restores the first task on a fresh device.
+	targetDB := filepath.Join(t.TempDir(), "target.db")
+	manifest, err := ReadManifest(ctx, client)
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	if err := storage.InitWithManifest(ctx, targetDB, secret, manifest); err != nil {
+		t.Fatalf("init target: %v", err)
+	}
+	target, err := storage.Open(ctx, targetDB, secret)
+	if err != nil {
+		t.Fatalf("open target: %v", err)
+	}
+	defer target.Close()
+	if err := Pull(ctx, target, client); err != nil {
+		t.Fatalf("pull after interruption: %v", err)
+	}
+	tasks, err := target.ListTasks(ctx)
+	if err != nil {
+		t.Fatalf("list target: %v", err)
+	}
+	if len(tasks) != 1 || tasks[0].Title != "First durable task" {
+		t.Fatalf("prior artifact not intact after interruption: %#v", tasks)
+	}
+
+	// Retrying the push succeeds and now carries both tasks.
+	if err := Push(ctx, store, client); err != nil {
+		t.Fatalf("retry push: %v", err)
+	}
+	if err := Pull(ctx, target, client); err != nil {
+		t.Fatalf("pull after retry: %v", err)
+	}
+	tasks, err = target.ListTasks(ctx)
+	if err != nil {
+		t.Fatalf("list target after retry: %v", err)
+	}
+	if len(tasks) != 2 {
+		t.Fatalf("retry push did not deliver both tasks: %#v", tasks)
+	}
+}
+
 func TestPullDuplicateDeviceSequenceRecordsConflict(t *testing.T) {
 	ctx := context.Background()
 	secret := "pull conflict secret"
@@ -561,6 +659,20 @@ func (c failingClient) Get(ctx context.Context, name string) ([]byte, error) {
 
 func (c failingClient) List(ctx context.Context, prefix string) ([]string, error) {
 	return nil, fmt.Errorf("not implemented")
+}
+
+// interruptingClient delegates to a real client but fails one named write,
+// simulating a crash partway through a multi-artifact push.
+type interruptingClient struct {
+	Client
+	failName string
+}
+
+func (c interruptingClient) Put(ctx context.Context, name string, data []byte) error {
+	if name == c.failName {
+		return fmt.Errorf("simulated interruption writing %s", name)
+	}
+	return c.Client.Put(ctx, name, data)
 }
 
 // assertNoPlaintextUnder walks every file under root and fails if any of the

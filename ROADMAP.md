@@ -129,6 +129,13 @@ Acceptance:
 - Security-sensitive failure modes produce clear user-facing errors.
 - Release notes document what v1 protects and what it does not protect.
 
+Current status:
+
+- Local sync artifacts are written atomically (temp file + rename) so an interrupted push cannot corrupt the cloud copy; covered by an interruption test.
+- A redaction test asserts wrong-key and not-found errors never contain Sensitive Task Data.
+- Google Drive auth, quota/rate-limit, and network failures are classified into clear, retryable user-facing messages.
+- Install, usage, and threat-model release notes are in `docs/` (see Phase 5 deliverables).
+
 ## Deferred
 
 - Team collaboration.

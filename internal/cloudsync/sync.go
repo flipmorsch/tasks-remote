@@ -50,12 +50,43 @@ func (c LocalDirClient) Put(ctx context.Context, name string, data []byte) error
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("create sync directory: %w", err)
 	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
+	// Write to a temp file and rename into place so an interrupted or crashed
+	// push can never leave a half-written artifact that would later fail to
+	// authenticate and block pulls. The rename is atomic within the directory.
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("create temp sync artifact %s: %w", name, err)
+	}
+	tmpName := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return fmt.Errorf("secure temp sync artifact %s: %w", name, err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
 		return fmt.Errorf("write sync artifact %s: %w", name, err)
 	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return fmt.Errorf("flush sync artifact %s: %w", name, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close sync artifact %s: %w", name, err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return fmt.Errorf("commit sync artifact %s: %w", name, err)
+	}
+	cleanup = false
 	return nil
 }
 
@@ -93,6 +124,11 @@ func (c LocalDirClient) List(ctx context.Context, prefix string) ([]string, erro
 			return err
 		}
 		if d.IsDir() {
+			return nil
+		}
+		// Skip in-progress temp artifacts (and any dotfile) so an interrupted
+		// write is never mistaken for a real artifact during a pull.
+		if strings.HasPrefix(d.Name(), ".") {
 			return nil
 		}
 		rel, err := filepath.Rel(c.Dir, path)
