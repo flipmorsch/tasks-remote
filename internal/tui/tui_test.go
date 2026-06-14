@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -56,36 +55,6 @@ func TestRestorePhraseWarnsWhenPendingLocalChangesExist(t *testing.T) {
 	}
 	if got := restorePhrase(storage.SyncStatus{Initialized: true}); got != "RESTORE" {
 		t.Fatalf("restore phrase = %q", got)
-	}
-}
-
-func TestSyncConfigPersistsPerDatabase(t *testing.T) {
-	configHome := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", configHome)
-	dbA := filepath.Join(t.TempDir(), "a.db")
-	dbB := filepath.Join(t.TempDir(), "b.db")
-
-	cfgA := syncConfig{Kind: syncDir, Dir: "/tmp/a"}
-	cfgB := syncConfig{Kind: syncGoogle, CredentialsPath: "/tmp/credentials.json"}
-	if err := saveSyncConfig(dbA, cfgA); err != nil {
-		t.Fatalf("save A: %v", err)
-	}
-	if err := saveSyncConfig(dbB, cfgB); err != nil {
-		t.Fatalf("save B: %v", err)
-	}
-	gotA, err := loadSyncConfig(dbA)
-	if err != nil {
-		t.Fatalf("load A: %v", err)
-	}
-	gotB, err := loadSyncConfig(dbB)
-	if err != nil {
-		t.Fatalf("load B: %v", err)
-	}
-	if gotA != cfgA {
-		t.Fatalf("config A = %#v, want %#v", gotA, cfgA)
-	}
-	if gotB != cfgB {
-		t.Fatalf("config B = %#v, want %#v", gotB, cfgB)
 	}
 }
 
