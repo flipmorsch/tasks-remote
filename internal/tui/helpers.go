@@ -2,12 +2,9 @@ package tui
 
 import (
 	"fmt"
-	"os"
 	"sort"
 	"strings"
 	"time"
-
-	"github.com/charmbracelet/lipgloss"
 
 	"tasks-remote/internal/storage"
 	"tasks-remote/internal/syncsetup"
@@ -145,31 +142,6 @@ func helpText() string {
 `
 }
 
-func headerStyle() lipgloss.Style {
-	if noColor() {
-		return lipgloss.NewStyle().Bold(true)
-	}
-	return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39"))
-}
-
-func errorStyle() lipgloss.Style {
-	if noColor() {
-		return lipgloss.NewStyle()
-	}
-	return lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
-}
-
-func noticeStyle() lipgloss.Style {
-	if noColor() {
-		return lipgloss.NewStyle()
-	}
-	return lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
-}
-
-func noColor() bool {
-	return os.Getenv("NO_COLOR") != ""
-}
-
 func truncate(s string, width int) string {
 	if width <= 0 || len(s) <= width {
 		return s
@@ -188,4 +160,38 @@ func maxWidth(width int) int {
 		return width
 	}
 	return width - 2
+}
+
+func syncBadge(status storage.SyncStatus, cfg syncsetup.Config) string {
+	t := currentTheme()
+	text := syncHealthText(status, cfg)
+	if status.OpenConflicts > 0 || status.PendingChanges > 0 || cfg.Kind == syncsetup.None {
+		return t.warningBadge.Render(text)
+	}
+	return t.badge.Render(text)
+}
+
+func statusBadge(status string) string {
+	t := currentTheme()
+	switch status {
+	case "done":
+		return t.badge.Render("done")
+	default:
+		return t.warningBadge.Render("open")
+	}
+}
+
+func renderKeyHints(hints ...string) string {
+	t := currentTheme()
+	styled := make([]string, 0, len(hints))
+	for _, hint := range hints {
+		if strings.HasPrefix(hint, "[") {
+			if end := strings.Index(hint, "]"); end >= 0 {
+				styled = append(styled, t.key.Render(hint[:end+1])+hint[end+1:])
+				continue
+			}
+		}
+		styled = append(styled, hint)
+	}
+	return renderHint(styled...)
 }

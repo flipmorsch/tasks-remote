@@ -4,27 +4,35 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"tasks-remote/internal/storage"
+	"tasks-remote/internal/syncsetup"
 )
 
 func (m model) View() string {
 	var b strings.Builder
+	t := currentTheme()
 	title := "tasks-remote"
 	if m.width > 0 && m.width < 56 {
 		title = "tasks"
 	}
-	b.WriteString(headerStyle().Render(title))
+	b.WriteString(t.header.Render(title))
+	if m.status.Initialized {
+		b.WriteString(" ")
+		b.WriteString(syncBadge(m.status, m.config))
+	}
 	b.WriteString("\n")
 	if m.busy != "" {
-		b.WriteString(m.busy)
+		b.WriteString(t.muted.Render(m.busy))
 		b.WriteString("\n")
 		return b.String()
 	}
 	if m.err != "" {
-		b.WriteString(errorStyle().Render(m.err))
+		b.WriteString(t.error.Render(m.err))
 		b.WriteString("\n")
 	}
 	if m.notice != "" {
-		b.WriteString(noticeStyle().Render(m.notice))
+		b.WriteString(t.notice.Render(m.notice))
 		b.WriteString("\n")
 	}
 	switch m.mode {
@@ -74,12 +82,20 @@ func (m model) View() string {
 }
 
 func (m model) renderWork() string {
+	if m.width >= wideLayoutMinWidth {
+		return m.renderWideWork()
+	}
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("Sync Health: %s\n", syncHealthText(m.status, m.config)))
-	b.WriteString(fmt.Sprintf("View: %s\n\n", filterLabel(m.filter)))
+	t := currentTheme()
+	b.WriteString(t.section.Render("Working View"))
+	b.WriteString(" ")
+	b.WriteString(t.muted.Render(filterLabel(m.filter)))
+	b.WriteString("\n")
+	b.WriteString(fmt.Sprintf("Sync Health: %s\n\n", syncHealthText(m.status, m.config)))
 	tasks := m.visibleTasks()
 	if len(tasks) == 0 {
-		b.WriteString("No tasks in this view.\n")
+		b.WriteString(t.muted.Render("No tasks in this view."))
+		b.WriteString("\n")
 	} else {
 		for i, task := range tasks {
 			prefix := "  "
@@ -87,18 +103,72 @@ func (m model) renderWork() string {
 				prefix = "> "
 			}
 			line := fmt.Sprintf("%s[%s] %s%s%s", prefix, task.Status, task.Title, formatTags(task.Tags), formatDates(task))
-			b.WriteString(truncate(line, maxWidth(m.width)))
+			line = truncate(line, maxWidth(m.width))
+			if i == m.selected {
+				line = t.selected.Width(maxWidth(m.width)).Render(line)
+			}
+			b.WriteString(line)
 			b.WriteString("\n")
 		}
 	}
 	b.WriteString("\n")
 	if m.width > 0 && m.width < 70 {
-		b.WriteString("[?] help  [q] quit\n")
+		b.WriteString(renderKeyHints("[?] help", "[q] quit"))
+		b.WriteString("\n")
 	} else {
-		b.WriteString("[a] add  [e] edit  [space] done/reopen  [d] delete  [/] search  [s] Sync Now  [?] help  [q] quit\n")
-		b.WriteString("[1] Working  [2] All  [3] Done  [c] Conflicts  [S] Sync Setup  [g] Google Login  [r] Restore\n")
+		b.WriteString(renderKeyHints("[a] add", "[e] edit", "[space] done/reopen", "[d] delete", "[/] search", "[s] Sync Now", "[?] help", "[q] quit"))
+		b.WriteString("\n")
+		b.WriteString(renderKeyHints("[1] Working", "[2] All", "[3] Done", "[c] Conflicts", "[S] Sync Setup", "[g] Google Login", "[r] Restore"))
+		b.WriteString("\n")
 	}
 	return b.String()
+}
+
+func (m model) renderWideWork() string {
+	tasks := m.visibleTasks()
+	leftWidth := max(42, m.width*58/100)
+	rightWidth := max(32, m.width-leftWidth-3)
+	left := m.renderTaskListPanel(tasks, leftWidth)
+	right := m.renderSidePanel(tasks, rightWidth)
+	return joinPanels(left, right, leftWidth, rightWidth) + "\n" +
+		renderKeyHints("[a] add", "[e] edit", "[space] done/reopen", "[d] delete", "[/] search", "[s] Sync Now", "[?] help", "[q] quit") + "\n" +
+		renderKeyHints("[1] Working", "[2] All", "[3] Done", "[c] Conflicts", "[S] Sync Setup", "[g] Google Login", "[r] Restore") + "\n"
+}
+
+func (m model) renderTaskListPanel(tasks []storage.Task, width int) string {
+	t := currentTheme()
+	var b strings.Builder
+	b.WriteString(t.section.Render("Tasks"))
+	b.WriteString(" ")
+	b.WriteString(t.muted.Render(filterLabel(m.filter)))
+	b.WriteString("\n\n")
+	if len(tasks) == 0 {
+		b.WriteString(t.muted.Render("No tasks in this view."))
+		b.WriteString("\n")
+		return t.panel.Width(width - 2).Render(b.String())
+	}
+	lineWidth := max(20, width-6)
+	for i, task := range tasks {
+		prefix := "  "
+		if i == m.selected {
+			prefix = "> "
+		}
+		line := fmt.Sprintf("%s%s %s%s%s", prefix, statusBadge(task.Status), task.Title, formatTags(task.Tags), formatDates(task))
+		line = truncate(line, lineWidth)
+		if i == m.selected {
+			line = t.selected.Width(lineWidth).Render(line)
+		}
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
+	return t.panel.Width(width - 2).Render(b.String())
+}
+
+func (m model) renderSidePanel(tasks []storage.Task, width int) string {
+	if task, ok := selectedTask(tasks, m.selected); ok {
+		return currentTheme().panel.Width(width - 2).Render(renderTaskSummary(task, width-6, m.status, m.config))
+	}
+	return currentTheme().panel.Width(width - 2).Render(renderDashboard(m.status, m.config))
 }
 
 func (m model) renderDetail() string {
@@ -106,8 +176,18 @@ func (m model) renderDetail() string {
 	if !ok {
 		return "No task selected.\n"
 	}
+	return renderTaskSummary(task, maxWidth(m.width), m.status, m.config) + "\n[e] edit  [d] delete  [esc] back\n"
+}
+
+func renderTaskSummary(task storage.Task, width int, status storage.SyncStatus, cfg syncsetup.Config) string {
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("%s [%s]\n", task.Title, task.Status))
+	t := currentTheme()
+	b.WriteString(t.section.Render("Selected Task"))
+	b.WriteString("\n\n")
+	b.WriteString(t.title.Render(truncate(task.Title, width)))
+	b.WriteString(" ")
+	b.WriteString(statusBadge(task.Status))
+	b.WriteString("\n")
 	b.WriteString(fmt.Sprintf("id: %s\n", task.ID))
 	if len(task.Tags) > 0 {
 		b.WriteString(fmt.Sprintf("tags: %s\n", strings.Join(task.Tags, ", ")))
@@ -120,10 +200,27 @@ func (m model) renderDetail() string {
 	}
 	if task.Body != "" {
 		b.WriteString("\n")
-		b.WriteString(task.Body)
+		b.WriteString(truncate(task.Body, width))
 		b.WriteString("\n")
 	}
-	b.WriteString("\n[e] edit  [d] delete  [esc] back\n")
+	b.WriteString("\n")
+	b.WriteString(t.section.Render("Sync"))
+	b.WriteString("\n")
+	b.WriteString(syncHealthText(status, cfg))
+	b.WriteString("\n")
+	return b.String()
+}
+
+func renderDashboard(status storage.SyncStatus, cfg syncsetup.Config) string {
+	var b strings.Builder
+	t := currentTheme()
+	b.WriteString(t.section.Render("Dashboard"))
+	b.WriteString("\n\n")
+	b.WriteString("No task selected in this view.\n\n")
+	b.WriteString(t.section.Render("Sync"))
+	b.WriteString("\n")
+	b.WriteString(syncHealthText(status, cfg))
+	b.WriteString("\n")
 	return b.String()
 }
 
