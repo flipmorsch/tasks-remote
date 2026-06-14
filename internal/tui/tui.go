@@ -358,12 +358,14 @@ func (m model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			m.mode = modeCreateConfirm
 			m.inputs = []textinput.Model{newSecretInput("Confirm recovery secret")}
+			m.focus = 0
 			return m, nil
 		case modeCreateConfirm:
 			if m.inputs[0].Value() != m.secret {
 				m.err = "Recovery Secret confirmation did not match"
 				m.mode = modeCreateSecret
 				m.inputs = []textinput.Model{newSecretInput("Recovery secret")}
+				m.focus = 0
 				return m, nil
 			}
 			m.busy = "Creating Task Collection..."
@@ -405,6 +407,7 @@ func (m model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.restoreOp {
 				m.mode = modeRestoreSecret
 				m.inputs = []textinput.Model{newSecretInput("Recovery secret")}
+				m.focus = 0
 				return m, nil
 			}
 			if m.unlocked {
@@ -425,6 +428,7 @@ func (m model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			phrase := restorePhrase(m.status)
 			input := newTextInput("Type " + phrase + " to restore")
 			m.inputs = []textinput.Model{input}
+			m.focus = 0
 			return m, nil
 		case modeRestoreConfirm:
 			if m.inputs[0].Value() != restorePhrase(m.status) {
@@ -677,6 +681,9 @@ func (m model) saveForm() (tea.Model, tea.Cmd) {
 func (m model) updateFocusedInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if len(m.inputs) == 0 {
 		return m, nil
+	}
+	if m.focus < 0 || m.focus >= len(m.inputs) {
+		m.focus = 0
 	}
 	var cmd tea.Cmd
 	m.inputs[m.focus], cmd = m.inputs[m.focus].Update(msg)

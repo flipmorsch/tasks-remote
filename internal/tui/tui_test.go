@@ -7,8 +7,10 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
+	tea "github.com/charmbracelet/bubbletea"
 
 	"tasks-remote/internal/storage"
+	"tasks-remote/internal/syncsetup"
 )
 
 func TestSplitTagsNormalizesAndDeduplicates(t *testing.T) {
@@ -59,6 +61,44 @@ func TestRestorePhraseWarnsWhenPendingLocalChangesExist(t *testing.T) {
 	}
 	if got := restorePhrase(storage.SyncStatus{Initialized: true}); got != "RESTORE" {
 		t.Fatalf("restore phrase = %q", got)
+	}
+}
+
+func TestEnteringRestoreSecretAfterSyncSetupResetsFocus(t *testing.T) {
+	m := newModel(t.Context(), "tasks.db")
+	m.mode = modeSyncSetup
+	m.restoreOp = true
+	m.inputs = syncSetupInputs(syncsetup.Config{Kind: syncsetup.Dir, Dir: t.TempDir()})
+	m.focus = 2
+
+	updated, _ := m.handleInputKey(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+	if m.mode != modeRestoreSecret {
+		t.Fatalf("mode = %v, want restore secret", m.mode)
+	}
+	if m.focus != 0 {
+		t.Fatalf("focus = %d, want 0", m.focus)
+	}
+
+	updated, _ = m.handleInputKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+	m = updated.(model)
+	if got := m.inputs[0].Value(); got != "s" {
+		t.Fatalf("secret input = %q, want s", got)
+	}
+}
+
+func TestUpdateFocusedInputClampsStaleFocus(t *testing.T) {
+	m := newModel(t.Context(), "tasks.db")
+	m.inputs = []textinput.Model{newTextInput("Recovery secret")}
+	m.focus = 1
+
+	updated, _ := m.updateFocusedInput(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+	m = updated.(model)
+	if m.focus != 0 {
+		t.Fatalf("focus = %d, want 0", m.focus)
+	}
+	if got := m.inputs[0].Value(); got != "s" {
+		t.Fatalf("input = %q, want s", got)
 	}
 }
 
