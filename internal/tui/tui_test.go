@@ -1,8 +1,12 @@
 package tui
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/charmbracelet/bubbles/textinput"
 
 	"tasks-remote/internal/storage"
 )
@@ -55,6 +59,30 @@ func TestRestorePhraseWarnsWhenPendingLocalChangesExist(t *testing.T) {
 	}
 	if got := restorePhrase(storage.SyncStatus{Initialized: true}); got != "RESTORE" {
 		t.Fatalf("restore phrase = %q", got)
+	}
+}
+
+func TestPickerStartDirUsesExistingFileParent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "credentials.json")
+	if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
+		t.Fatalf("write credentials: %v", err)
+	}
+	inputs := []textinput.Model{textinput.New(), textinput.New(), textinput.New()}
+	inputs[1].SetValue(path)
+
+	if got := pickerStartDir(pickerCredentials, inputs); got != dir {
+		t.Fatalf("start dir = %q, want %q", got, dir)
+	}
+}
+
+func TestPickerStartDirUsesExistingDirectory(t *testing.T) {
+	dir := t.TempDir()
+	inputs := []textinput.Model{textinput.New(), textinput.New(), textinput.New()}
+	inputs[2].SetValue(dir)
+
+	if got := pickerStartDir(pickerSyncDir, inputs); got != dir {
+		t.Fatalf("start dir = %q, want %q", got, dir)
 	}
 }
 

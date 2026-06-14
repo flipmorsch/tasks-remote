@@ -54,7 +54,11 @@ func (m model) View() string {
 		b.WriteString("Local Sync Setup\n")
 		b.WriteString("Type: google or dir. Google uses Drive app data; dir is for local testing.\n\n")
 		b.WriteString(renderInputs(m.inputs, m.focus))
-		b.WriteString("\nenter: save  tab: next  esc: cancel\n")
+		b.WriteString("\n")
+		b.WriteString(renderKeyHints("[enter] save", "[tab] next", "[ctrl+f] pick credentials", "[ctrl+d] pick directory", "[esc] cancel"))
+		b.WriteString("\n")
+	case modeFilePicker:
+		b.WriteString(m.renderFilePicker())
 	case modeWork:
 		b.WriteString(m.renderWork())
 	case modeForm:
@@ -78,6 +82,31 @@ func (m model) View() string {
 	case modeHelp:
 		b.WriteString(helpText())
 	}
+	return b.String()
+}
+
+func (m model) renderFilePicker() string {
+	var b strings.Builder
+	t := currentTheme()
+	switch m.pickFor {
+	case pickerCredentials:
+		b.WriteString(t.section.Render("Select Google credentials JSON"))
+		b.WriteString("\n")
+		b.WriteString(t.muted.Render("Choose a .json OAuth desktop client credentials file."))
+	case pickerSyncDir:
+		b.WriteString(t.section.Render("Select local sync directory"))
+		b.WriteString("\n")
+		b.WriteString(t.muted.Render("Open folders with enter; press p to use the current folder."))
+	default:
+		b.WriteString(t.section.Render("Select path"))
+	}
+	b.WriteString("\n")
+	b.WriteString(t.muted.Render(m.picker.CurrentDirectory))
+	b.WriteString("\n\n")
+	b.WriteString(m.picker.View())
+	b.WriteString("\n")
+	b.WriteString(renderKeyHints("[enter] open/select", "[p] choose current directory", "[h] back", "[q] cancel"))
+	b.WriteString("\n")
 	return b.String()
 }
 

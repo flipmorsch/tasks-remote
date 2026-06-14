@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/filepicker"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"golang.org/x/term"
@@ -48,6 +49,7 @@ const (
 	modeSearch
 	modeHelp
 	modeSyncSetup
+	modeFilePicker
 	modeRestoreSecret
 	modeRestoreConfirm
 	modeDeleteConfirm
@@ -87,12 +89,22 @@ type model struct {
 	searchQuery string
 
 	inputs    []textinput.Model
+	picker    filepicker.Model
+	pickFor   pickerTarget
 	focus     int
 	formID    string
 	secret    string
 	restoreOp bool
 	pendingOp string
 }
+
+type pickerTarget int
+
+const (
+	pickerNone pickerTarget = iota
+	pickerCredentials
+	pickerSyncDir
+)
 
 type loadedMsg struct {
 	mode   mode
@@ -136,6 +148,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		if m.picker.Height > 0 {
+			m.picker.SetHeight(max(6, msg.Height-8))
+		}
 		return m, nil
 	case loadedMsg:
 		m.busy = ""
@@ -205,6 +220,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+		if m.mode == modeFilePicker {
+			return m.handleFilePickerKey(msg)
+		}
 		return m.handleKey(msg)
 	}
 	return m, nil
@@ -218,7 +236,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if key == "esc" {
 		m.err = ""
 		switch m.mode {
-		case modeHelp, modeDetail, modeSearch, modeSyncSetup, modeConflicts, modeConflictDetail:
+		case modeHelp, modeDetail, modeSearch, modeSyncSetup, modeFilePicker, modeConflicts, modeConflictDetail:
 			m.mode = modeWork
 			return m, nil
 		case modeForm:
@@ -313,6 +331,14 @@ func (m model) handleLockedKey(key string) (tea.Model, tea.Cmd) {
 }
 
 func (m model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.mode == modeSyncSetup {
+		switch msg.String() {
+		case "ctrl+f":
+			return m.openFilePicker(pickerCredentials)
+		case "ctrl+d":
+			return m.openFilePicker(pickerSyncDir)
+		}
+	}
 	switch msg.String() {
 	case "enter":
 		switch m.mode {
@@ -414,6 +440,42 @@ func (m model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m.updateFocusedInput(msg)
+}
+
+func (m model) handleFilePickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "q":
+		m.mode = modeSyncSetup
+		m.pickFor = pickerNone
+		return m, nil
+	case "p":
+		if m.pickFor == pickerSyncDir {
+			m.inputs[2].SetValue(m.picker.CurrentDirectory)
+			m.mode = modeSyncSetup
+			m.pickFor = pickerNone
+			m.notice = "Local sync directory selected"
+			return m, nil
+		}
+	}
+	var cmd tea.Cmd
+	m.picker, cmd = m.picker.Update(msg)
+	if didSelect, path := m.picker.DidSelectFile(msg); didSelect {
+		switch m.pickFor {
+		case pickerCredentials:
+			m.inputs[1].SetValue(path)
+			m.notice = "Google credentials file selected"
+		case pickerSyncDir:
+			m.inputs[2].SetValue(path)
+			m.notice = "Local sync directory selected"
+		}
+		m.mode = modeSyncSetup
+		m.pickFor = pickerNone
+		return m, nil
+	}
+	if disabled, path := m.picker.DidSelectDisabledFile(msg); disabled {
+		m.err = fmt.Sprintf("select a .json credentials file: %s", path)
+	}
+	return m, cmd
 }
 
 func (m model) handleWorkKey(key string) (tea.Model, tea.Cmd) {
