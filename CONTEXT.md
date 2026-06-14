@@ -47,6 +47,15 @@ Do not use "Task Collection" for a single task, a shared workspace, or a storage
 
 Related terms: Personal Task Manager
 
+### Task Collection Setup
+
+The first-use path where a person either creates a new Task Collection or restores an existing Task Collection onto the device.
+
+Use "Task Collection Setup" when discussing the choices available before the device has local access to a Task Collection.
+Do not use "Task Collection Setup" for unlocking an existing local Task Collection, ordinary sync, or routine task work.
+
+Related terms: Task Collection, Recovery Secret, Protected Task Copy, Restore Confirmation
+
 ### Sensitive Task Data
 
 Personal task content that may reveal private identity, plans, relationships, locations, health, work, legal, financial, or security information.
@@ -96,16 +105,79 @@ Related terms: Unlocked Device, Sensitive Task Data
 
 The user's current confidence that recent Task Changes have been protected and can be restored on another device.
 
-Use "Sync Health" when discussing whether the app is online, caught up, retrying, blocked, or waiting for conflict resolution.
-Do not use "Sync Health" for whether local task commands can be used.
+Use "Sync Health" when discussing whether sync is not configured, locked, pending local changes, caught up, retrying, blocked, or waiting for conflict resolution.
+Do not use "Sync Health" for whether local task commands can be used, or to imply that ordinary task work must stop while a Sync Conflict is open.
 
 Related terms: Task Change, Recovery Window, Sync Conflict
+
+### Sync Now
+
+A deliberate user action that exchanges Task Changes with the configured Protected Task Copy and then refreshes the local view of the Task Collection.
+
+Use "Sync Now" when discussing the primary manual sync action in the Interactive Task Surface.
+Do not use "Sync Now" for background sync, restore, export, setup-only actions, or individual low-level upload and download controls.
+
+Related terms: Sync Health, Task Change, Protected Task Copy, Interactive Task Surface
+
+### Interactive Task Surface
+
+The default person-facing workspace for reviewing current work, creating and changing tasks, organizing tasks, searching the Task Collection, resolving Sync Conflicts, checking Sync Health, and starting recovery actions without memorizing commands.
+
+Use "Interactive Task Surface" when discussing the product experience shown when a person opens the Personal Task Manager directly in an interactive terminal.
+Do not use "Interactive Task Surface" for replacing command syntax, storage files, background automation, non-interactive shell use, or cloud-side task access.
+
+Related terms: Personal Task Manager, Task Collection, Sync Health, Unlocked Device, Locked Device
+
+### Working View
+
+A task-focused view that helps the person act on overdue, due, upcoming, reminded, and open work before browsing the whole Task Collection.
+
+Use "Working View" when discussing the primary unlocked view of the Interactive Task Surface.
+Do not use "Working View" for reading full task notes, viewing task identifiers, completed-task browsing, the full task history, cloud sync state, or recovery flow.
+
+Related terms: Interactive Task Surface, Task Collection, Task Search
+
+### Local Sync Setup
+
+Device-local information that helps the person start manual sync actions without re-entering non-secret setup details each time, including the chosen sync location for the current Task Collection.
+
+Use "Local Sync Setup" when discussing saved sync convenience state on a device.
+Do not use "Local Sync Setup" for OAuth tokens, the Recovery Secret, Sensitive Task Data, Protected Task Copies, or setup shared across unrelated Task Collections.
+
+Related terms: Sync Health, Recovery Secret, Protected Task Copy, Locked Device
+
+### Destructive Task Action
+
+A user action that removes task content from the normal working view and may require recovery or sync history to revisit later.
+
+Use "Destructive Task Action" when discussing actions that should require deliberate confirmation before changing the Task Collection.
+Do not use "Destructive Task Action" for completion, tag changes, ordinary edits, or manual sync actions.
+
+Related terms: Task Change, Task Collection, Restore Confirmation
+
+### Task Form
+
+A deliberate create or edit flow where the person reviews task fields before saving a Task Change.
+
+Use "Task Form" when discussing task creation or editing that can be saved or canceled before it changes the Task Collection.
+Do not use "Task Form" for quick actions such as completion, reopening, confirmed deletion, search, or sync.
+
+Related terms: Task Change, Interactive Task Surface, Working View
+
+### Restore Confirmation
+
+A deliberate user approval before replacing or rebuilding local access to a Task Collection from a Protected Task Copy on a device that may already hold local task data.
+
+Use "Restore Confirmation" when a recovery action could change the local view of the Task Collection or overwrite local recovery state.
+Do not use "Restore Confirmation" for ordinary sync between healthy devices or for viewing Sync Health.
+
+Related terms: Protected Task Copy, Recovery Secret, Task Collection, Sync Health
 
 ### Task Search
 
 The ability to find tasks and notes by matching text inside the user's Task Collection.
 
 Use "Task Search" when discussing how the person finds their own task content on an Unlocked Device.
-Do not use "Task Search" for cloud-side indexing, Google Drive search, or searching another person's data.
+Do not use "Task Search" for cloud-side indexing, Google Drive search, searching another person's data, or exposing full task notes in compact result lists.
 
 Related terms: Task Collection, Unlocked Device, Sensitive Task Data
