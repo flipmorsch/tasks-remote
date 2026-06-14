@@ -14,6 +14,7 @@ import (
 	"tasks-remote/internal/googleauth"
 	"tasks-remote/internal/notify"
 	"tasks-remote/internal/storage"
+	"tasks-remote/internal/tui"
 	"tasks-remote/internal/unlock"
 
 	drive "google.golang.org/api/drive/v3"
@@ -36,6 +37,9 @@ func run(ctx context.Context, args []string) error {
 	}
 	rest := flags.Args()
 	if len(rest) == 0 {
+		if tui.IsInteractive() {
+			return tui.Run(ctx, tui.Options{DBPath: *dbPath})
+		}
 		usage()
 		return nil
 	}
@@ -43,6 +47,11 @@ func run(ctx context.Context, args []string) error {
 	commandArgs := rest[1:]
 
 	switch command {
+	case "tui":
+		if len(commandArgs) != 0 {
+			return fmt.Errorf("tui does not accept arguments")
+		}
+		return tui.Run(ctx, tui.Options{DBPath: *dbPath})
 	case "init":
 		secret, err := inputRecoverySecret()
 		if err != nil {
@@ -757,6 +766,7 @@ implemented:
   init
   unlock
   lock
+  tui
   add [-body text] [-due date] [-remind date] <title>
   edit [-body text] [-due date] [-remind date] <task-id> <title>
   done <task-id>
